@@ -141,6 +141,18 @@ END_LEGAL */
 #define PROCESSEND	9999
 #define THREADEND	999
 
+/* ===================================================================== */
+/* Global Variables */
+/* ===================================================================== */
+int pid;
+char *output;
+
+FILE * trace;
+int flag[MAX_THREAD];
+char* per_thread_buf[2][MAX_THREAD];
+
+std::ofstream TraceFile;
+
 typedef struct log
 {
 	long unsigned int address;
@@ -226,6 +238,18 @@ treeNode * Insert(treeNode *node, long unsigned int address, long unsigned int s
 	return node;
 }
 
+struct log* FreeLog(struct log* log)
+{
+	if(log != NULL)
+	{
+		log->next = FreeLog(log->next);
+		free(log);
+		return NULL;
+	}
+	else
+		return NULL;
+}
+
 int PrintLog(struct log *log)
 {
 	int ret;
@@ -235,12 +259,12 @@ int PrintLog(struct log *log)
 	ret = PrintLog(log->next);
 	if(log->isread == TRUE)
 	{
-		fprintf(stderr, "read %lx %lx\n", log->address, log->size);
+		fprintf(trace, "read %lx %lx\n", log->address, log->size);
 		return 1;
 	}
 	else if(ret != 0)
 	{
-		fprintf(stderr, "store %lx %lx\n", log->address, log->size);
+		fprintf(trace, "store %lx %lx\n", log->address, log->size);
 		return 1;
 	}
 	else
@@ -270,6 +294,7 @@ treeNode * Delete(treeNode *node, long unsigned int address)
 			assert(node->log != NULL);
 			PrintLog(node->log);
 		}
+		node->log = FreeLog(node->log);
 		/* Now We can delete this node and replace with either minimum element
                    in the right sub tree or maximum element in the left subtree */
 		if(node->right && node->left)
@@ -277,6 +302,9 @@ treeNode * Delete(treeNode *node, long unsigned int address)
 			/* Here we will replace with minimum element in the right sub tree */
 			temp = FindMin(node->right);
 			node -> address = temp->address;
+			node->size = temp->size;
+			node->log = temp->log;
+
 			/* As we replaced it with some other node, we have to delete that node */
 			node -> right = Delete(node->right,temp->address);
 		}
@@ -376,18 +404,6 @@ VOID PrintPostorder(treeNode *node)
 	PrintPostorder(node->right);
 	printf("%ld ",node->address);
 }
-
-/* ===================================================================== */
-/* Global Variables */
-/* ===================================================================== */
-int pid;
-char *output;
-
-FILE * trace;
-int flag[MAX_THREAD];
-char* per_thread_buf[2][MAX_THREAD];
-
-std::ofstream TraceFile;
 
 /* ===================================================================== */
 /* Commandline Switches */
@@ -542,9 +558,9 @@ struct fd_list
 // Print syscall number and arguments
 VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2, ADDRINT arg3, ADDRINT arg4, ADDRINT arg5)
 {
-	unsigned int i;
-	struct iovec* vec;
-	char buf[MAX_BUFSIZE];
+//	unsigned int i;
+//	struct iovec* vec;
+//	char buf[MAX_BUFSIZE];
 
 	int threadid = PIN_GetTid();
 	if(per_thread_buf[0][threadid] == NULL)
@@ -570,10 +586,10 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 			InsertLog(node, log);
 			node->usedforread = TRUE;
 		}
-//		else
-//		{
-//			fprintf(stderr, "read at non malloced %.6lf %lx %lx\n", get_timer(), arg1, arg2);
-//		}
+		else
+		{
+			fprintf(trace, "read at non malloced %.6lf %lx %lx\n", get_timer(), arg1, arg2);
+		}
 
 		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
 		flag[threadid] = 3;
@@ -582,34 +598,34 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
 		flag[threadid] = 3;
 		return;
-	case SYS_READV:
-	case SYS_WRITEV:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, ip, num, arg0, arg2);
-		vec = (struct iovec *)arg1;
-		for(i=0; i < arg2; i++)
-		{
-			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
-			strcat(per_thread_buf[0][threadid], buf);
-		}
-		flag[threadid] = 3;
-		return;
-	case SYS_PREADV:
-	case SYS_PWRITEV:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx", threadid, ip, num, arg0, arg2, arg3);
-		vec = (struct iovec *)arg1;
-		for(i=0; i < arg2; i++)
-		{
-			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
-			strcat(per_thread_buf[0][threadid], buf);
-		}
-		flag[threadid] = 3;
-		return;
-
-	case SYS_PREAD64:
-	case SYS_PWRITE64:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
-		flag[threadid] = 3;
-		return;
+//	case SYS_READV:
+//	case SYS_WRITEV:
+//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, ip, num, arg0, arg2);
+//		vec = (struct iovec *)arg1;
+//		for(i=0; i < arg2; i++)
+//		{
+//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
+//			strcat(per_thread_buf[0][threadid], buf);
+//		}
+//		flag[threadid] = 3;
+//		return;
+//	case SYS_PREADV:
+//	case SYS_PWRITEV:
+//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx", threadid, ip, num, arg0, arg2, arg3);
+//		vec = (struct iovec *)arg1;
+//		for(i=0; i < arg2; i++)
+//		{
+//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
+//			strcat(per_thread_buf[0][threadid], buf);
+//		}
+//		flag[threadid] = 3;
+//		return;
+//
+//	case SYS_PREAD64:
+//	case SYS_PWRITE64:
+//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
+//		flag[threadid] = 3;
+//		return;
 
 	case SYS_LSEEK:
 		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
@@ -744,7 +760,7 @@ VOID MemoryWrite(ADDRINT ip, ADDRINT memaddr,
 	treeNode *node = FindInRange(bst_root, memaddr);
 	if(node != NULL)
 	{
-//		fprintf(stderr, "wirte size %lx\n", writesize);
+//		fprintf(trace, "wirte size %lx\n", writesize);
 		struct log* log = (struct log*)malloc(sizeof(struct log));
 		log->time = get_timer();
 		log->address = memaddr;
