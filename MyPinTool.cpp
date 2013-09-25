@@ -1,35 +1,10 @@
 /*BEGIN_LEGAL
-Intel Open Source License
-
-Copyright (c) 2002-2013 Intel Corporation. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-Redistributions of source code must retain the above copyright notice,
-this list of conditions and the following disclaimer.  Redistributions
-in binary form must reproduce the above copyright notice, this list of
-conditions and the following disclaimer in the documentation and/or
-other materials provided with the distribution.  Neither the name of
-the Intel Corporation nor the names of its contributors may be used to
-endorse or promote products derived from this software without
-specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE INTEL OR
-ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-END_LEGAL */
 /*
  *  This file contains an ISA-portable PIN tool for tracing system calls
+ */
+
+/*
+ * /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/pin -t /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- filebench
  */
 
 #include <stdio.h>
@@ -41,6 +16,8 @@ END_LEGAL */
 #include <unistd.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <errno.h>
 
 #if defined(TARGET_MAC)
 #include <sys/syscall.h>
@@ -146,6 +123,7 @@ END_LEGAL */
 /* ===================================================================== */
 int pid;
 char *output;
+long unsigned int mmap_base;
 
 FILE * trace;
 int flag[MAX_THREAD];
@@ -155,8 +133,8 @@ std::ofstream TraceFile;
 
 typedef struct log
 {
-	long unsigned int address;
-	long unsigned int size;
+	ADDRINT address;
+	ADDRINT size;
 
 	double time;
 
@@ -167,8 +145,8 @@ typedef struct log
 
 typedef struct treeNode
 {
-	long unsigned int address;
-	long unsigned int size;
+	ADDRINT address;
+	ADDRINT size;
 	BOOL usedforread;
 
 	struct log *log;
@@ -178,7 +156,7 @@ typedef struct treeNode
 
 }treeNode;
 
-treeNode *bst_root;
+treeNode *malloc_root, *stack_root[MAX_THREAD];
 
 VOID InsertLog(treeNode *node, log* log)
 {
@@ -212,7 +190,7 @@ treeNode* FindMax(treeNode *node)
 		return node;
 }
 
-treeNode * Insert(treeNode *node, long unsigned int address, long unsigned int size)
+treeNode * Insert(treeNode *node, ADDRINT address, ADDRINT size)
 {
 	if(node==NULL)
 	{
@@ -223,6 +201,7 @@ treeNode * Insert(treeNode *node, long unsigned int address, long unsigned int s
 		temp -> usedforread = FALSE;
 		temp -> log = NULL;
 		temp -> left = temp -> right = NULL;
+		fprintf(stderr, "%d malloced %lx\n", getpid(), address);
 		return temp;
 	}
 
@@ -240,14 +219,14 @@ treeNode * Insert(treeNode *node, long unsigned int address, long unsigned int s
 
 struct log* FreeLog(struct log* log)
 {
-	if(log != NULL)
+//	fprintf(stderr, "free ");
+	struct log* temp = log;
+	while(temp != NULL)
 	{
-		log->next = FreeLog(log->next);
-		free(log);
-		return NULL;
+		temp = temp->next;
+		free(temp);
 	}
-	else
-		return NULL;
+	return NULL;
 }
 
 int PrintLog(struct log *log)
@@ -273,11 +252,9 @@ int PrintLog(struct log *log)
 	}
 }
 
-treeNode * Delete(treeNode *node, long unsigned int address)
+treeNode * Delete(treeNode *node, ADDRINT address)
 {
 	treeNode *temp;
-	assert(node != NULL);
-
 	if(address < node->address)
 	{
 		node->left = Delete(node->left, address);
@@ -290,7 +267,6 @@ treeNode * Delete(treeNode *node, long unsigned int address)
 	{
 		if(node->usedforread == TRUE)
 		{
-//			assert(0);
 			assert(node->log != NULL);
 			PrintLog(node->log);
 		}
@@ -303,6 +279,7 @@ treeNode * Delete(treeNode *node, long unsigned int address)
 			temp = FindMin(node->right);
 			node -> address = temp->address;
 			node->size = temp->size;
+			node->usedforread = temp->usedforread;
 			node->log = temp->log;
 
 			/* As we replaced it with some other node, we have to delete that node */
@@ -324,7 +301,7 @@ treeNode * Delete(treeNode *node, long unsigned int address)
 
 }
 
-treeNode * Find(treeNode *node, long unsigned int address)
+treeNode * Find(treeNode *node, ADDRINT address)
 {
 	if(node==NULL)
 	{
@@ -348,7 +325,7 @@ treeNode * Find(treeNode *node, long unsigned int address)
 	}
 }
 
-treeNode* FindInRange(treeNode *node, long unsigned int address)
+treeNode* FindInRange(treeNode *node, ADDRINT address)
 {
 	if(node==NULL)
 	{
@@ -414,7 +391,7 @@ KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool",
 
 /* ===================================================================== */
 
-long unsigned int mallocsize[MAX_THREAD];
+ADDRINT mallocsize[MAX_THREAD];
 
 /* ===================================================================== */
 /* Analysis routines                                                     */
@@ -425,29 +402,28 @@ VOID Arg1Before(CHAR * name, ADDRINT size)
 	int threadid = PIN_GetTid();
 	if(name[0] == 'm')
 	{
-//		if(per_thread_buf[1][threadid] == NULL)
-//		{
-//			per_thread_buf[1][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
-//		}
-//		sprintf(per_thread_buf[1][threadid], "%s %lx ", name, size);
 		mallocsize[threadid] = size;
 	}
 	else
 	{
-//		TraceFile << name << "(" << size << ")" << endl;
-//		fprintf(trace, "%s %lx\n", name, size);
 		if(size != 0)
-			bst_root = Delete(bst_root, (long unsigned int)size);
+		{
+			fprintf(stderr, "%d free %lx\n", getpid(), size);
+			if(Find(malloc_root, size) == NULL)
+			{
+				fprintf(stderr, "no \n");
+			}
+			else
+				malloc_root = Delete(malloc_root, (ADDRINT)size);
+		}
 	}
 }
 
 VOID MallocAfter(ADDRINT ret)
 {
 	int threadid = PIN_GetTid();
-	bst_root = Insert(bst_root, ret, mallocsize[threadid]);
-//	assert(per_thread_buf[1][threadid]);
-//	fprintf(trace, "%s", per_thread_buf[1][threadid]);
-//	fprintf(trace, "%lx\n", ret);
+
+	malloc_root = Insert(malloc_root, ret, mallocsize[threadid]);
 }
 
 
@@ -558,9 +534,9 @@ struct fd_list
 // Print syscall number and arguments
 VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2, ADDRINT arg3, ADDRINT arg4, ADDRINT arg5)
 {
-//	unsigned int i;
-//	struct iovec* vec;
-//	char buf[MAX_BUFSIZE];
+	//	unsigned int i;
+	//	struct iovec* vec;
+	//	char buf[MAX_BUFSIZE];
 
 	int threadid = PIN_GetTid();
 	if(per_thread_buf[0][threadid] == NULL)
@@ -574,10 +550,9 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	switch(num)
 	{
 	case SYS_READ:
-		node = FindInRange(bst_root, arg1);
+		node = FindInRange(malloc_root, arg1);
 		if(node != NULL)
 		{
-//			assert(0);
 			log = (struct log*)malloc(sizeof(struct log));
 			log->time = get_timer();
 			log->address = arg1;
@@ -591,50 +566,50 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 			fprintf(trace, "read at non malloced %.6lf %lx %lx\n", get_timer(), arg1, arg2);
 		}
 
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, num, arg0, arg1, arg2);
 		flag[threadid] = 3;
 		return;
 	case SYS_WRITE:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, num, arg0, arg1, arg2);
 		flag[threadid] = 3;
 		return;
-//	case SYS_READV:
-//	case SYS_WRITEV:
-//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, ip, num, arg0, arg2);
-//		vec = (struct iovec *)arg1;
-//		for(i=0; i < arg2; i++)
-//		{
-//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
-//			strcat(per_thread_buf[0][threadid], buf);
-//		}
-//		flag[threadid] = 3;
-//		return;
-//	case SYS_PREADV:
-//	case SYS_PWRITEV:
-//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx", threadid, ip, num, arg0, arg2, arg3);
-//		vec = (struct iovec *)arg1;
-//		for(i=0; i < arg2; i++)
-//		{
-//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
-//			strcat(per_thread_buf[0][threadid], buf);
-//		}
-//		flag[threadid] = 3;
-//		return;
-//
-//	case SYS_PREAD64:
-//	case SYS_PWRITE64:
-//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
-//		flag[threadid] = 3;
-//		return;
+		//	case SYS_READV:
+		//	case SYS_WRITEV:
+		//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, ip, num, arg0, arg2);
+		//		vec = (struct iovec *)arg1;
+		//		for(i=0; i < arg2; i++)
+		//		{
+		//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
+		//			strcat(per_thread_buf[0][threadid], buf);
+		//		}
+		//		flag[threadid] = 3;
+		//		return;
+		//	case SYS_PREADV:
+		//	case SYS_PWRITEV:
+		//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx", threadid, ip, num, arg0, arg2, arg3);
+		//		vec = (struct iovec *)arg1;
+		//		for(i=0; i < arg2; i++)
+		//		{
+		//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
+		//			strcat(per_thread_buf[0][threadid], buf);
+		//		}
+		//		flag[threadid] = 3;
+		//		return;
+		//
+		//	case SYS_PREAD64:
+		//	case SYS_PWRITE64:
+		//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
+		//		flag[threadid] = 3;
+		//		return;
 
 	case SYS_LSEEK:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, num, arg0, arg1, arg2);
 		break;
 
 	case SYS_FCNTL:
 		if(arg1 == F_DUPFD || arg1 == F_DUPFD_CLOEXEC)
 		{
-			sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx ", threadid, ip, num, arg0);
+			sprintf(per_thread_buf[0][threadid], "%x %lx %lx ", threadid, num, arg0);
 			break;
 		}
 		else
@@ -643,34 +618,34 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 			return;
 		}
 
-	case SYS_ACCEPT:
-	case SYS_ACCEPT4:
-	case SYS_EPOLL_CREATE:
-	case SYS_SOCKET:
-	case SYS_DUP:
-	case SYS_DUP2:
-	case SYS_DUP3:
-	case SYS_PIPE:
-	case SYS_PIPE2:
-	case SYS_SIGNALFD:
-	case SYS_TIMERFD_CREATE:
-	case SYS_EVENTFD:
-	case SYS_SIGNALFD4:
-	case SYS_EVENTFD2:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx ", threadid, ip, num);
-		break;
+		//	case SYS_ACCEPT:
+		//	case SYS_ACCEPT4:
+		//	case SYS_EPOLL_CREATE:
+		//	case SYS_SOCKET:
+		//	case SYS_DUP:
+		//	case SYS_DUP2:
+		//	case SYS_DUP3:
+		//	case SYS_PIPE:
+		//	case SYS_PIPE2:
+		//	case SYS_SIGNALFD:
+		//	case SYS_TIMERFD_CREATE:
+		//	case SYS_EVENTFD:
+		//	case SYS_SIGNALFD4:
+		//	case SYS_EVENTFD2:
+		//		sprintf(per_thread_buf[0][threadid], "%x %lx %lx ", threadid, num, arg0);
+		//		break;
 
 	case SYS_OPENAT:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %s ", threadid, ip, num, (char*)arg1);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %s ", threadid, num, (char*)arg1);
 		break;
 
 	case SYS_CREAT:
 	case SYS_OPEN:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %s ", threadid, ip, num, (char*)arg0);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %s ", threadid, num, (char*)arg0);
 		break;
 
 	case SYS_CLOSE:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx ", threadid, ip, num, arg0);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %lx ", threadid, num, arg0);
 		break;
 
 	case SYS_EXIT:
@@ -684,14 +659,14 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		return;
 
 	case SYS_CLONE:
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg1, arg2, arg2);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, num, arg1, arg2, arg2);
 		flag[threadid] = SYS_CLONE;
 		return;
 
 	case SYS_EXECVE:
 		stamp = get_timer();
 
-		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %s %lf ", threadid, ip, num, (char*)arg0, stamp);
+		sprintf(per_thread_buf[0][threadid], "%x %lx %s %lf ", threadid, num, (char*)arg0, stamp);
 		fprintf(trace, "%s\n", per_thread_buf[0][threadid]);
 		fflush(trace);
 		flag[threadid] = SYS_EXECVE;
@@ -757,10 +732,10 @@ VOID MemoryRead(ADDRINT ip, ADDRINT memaddr,
 VOID MemoryWrite(ADDRINT ip, ADDRINT memaddr,
 		ADDRINT writesize)
 {
-	treeNode *node = FindInRange(bst_root, memaddr);
+	treeNode *node = FindInRange(malloc_root, memaddr);
 	if(node != NULL)
 	{
-//		fprintf(trace, "wirte size %lx\n", writesize);
+		//		fprintf(trace, "wirte size %lx\n", writesize);
 		struct log* log = (struct log*)malloc(sizeof(struct log));
 		log->time = get_timer();
 		log->address = memaddr;
@@ -768,6 +743,23 @@ VOID MemoryWrite(ADDRINT ip, ADDRINT memaddr,
 		log->isread = FALSE;
 		InsertLog(node, log);
 	}
+}
+
+VOID FreeStack(int threadid, ADDRINT sp)
+{
+	treeNode *node = FindMin(stack_root[threadid]);
+	while(node != NULL && node->address < sp)
+	{
+		stack_root[threadid] = Delete(stack_root[threadid], node->address);
+		node = FindMin(stack_root[threadid]);
+	}
+}
+
+VOID Return(ADDRINT sp)
+{
+	int threadid = PIN_GetTid();
+	fprintf(stderr, "ret\n");
+	FreeStack(threadid, sp);
 }
 
 // Is called for every instruction and instruments syscalls
@@ -801,14 +793,25 @@ VOID Instruction(INS ins, VOID *v)
 				IARG_SYSRET_VALUE,
 				IARG_END);
 	}
+	if (INS_IsRet(ins) && INS_HasFallThrough(ins))
+	{
+		INS_InsertCall(ins, IPOINT_AFTER, AFUNPTR(Return),
+				IARG_REG_VALUE, REG_STACK_PTR,
+				IARG_END);
+
+	}
+//	PIN_GetContextReg(ctxt, REG_STACK_PTR)
 }
 
 VOID Fini(INT32 code, VOID *v)
 {
 	fprintf(trace, "%x %x\n", PIN_GetTid(), PROCESSEND);
+	while(malloc_root != NULL)
+	{
+		fprintf(stderr, "fini\n");
+		malloc_root = Delete(malloc_root, malloc_root->address);
+	}
 	fclose(trace);
-	while(bst_root != NULL)
-		bst_root = Delete(bst_root, bst_root->address);
 }
 
 /* ===================================================================== */
@@ -843,6 +846,29 @@ VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 
 int main(int argc, char *argv[])
 {
+
+	size_t length = 1024*1024;
+	off_t offset = 0;
+	int fd = open("./jim.mymemory", O_RDWR| O_CREAT, S_IRUSR| S_IWUSR );
+	if (fd == 0) {
+		int myerr = errno;
+		printf("ERROR: open failed (errno %d %s)\n", myerr, strerror(myerr));
+		return EXIT_FAILURE;
+	}
+	if (lseek(fd, length - 1, SEEK_SET) == -1) {
+		int myerr = errno;
+		printf("ERROR: lseek failed (errno %d %s)\n", myerr, strerror(myerr));
+		return EXIT_FAILURE;
+	}
+
+
+	pid = write(fd, "", 1);
+	int prot = (PROT_READ| PROT_WRITE);
+	int flags = MAP_SHARED;
+	mmap_base = (long unsigned int)mmap(NULL, length, prot, flags, fd, offset);
+
+	printf("%16lx\n", mmap_base);
+
 	// Initialize pin & symbol manager
 	PIN_InitSymbols();
 
@@ -863,22 +889,22 @@ int main(int argc, char *argv[])
 	root_thread->children = NULL;
 	root_thread->fd_own = NULL;
 	root_thread->fd_inherit = NULL;
-
-//	PIN_AddFollowChildProcessFunction(FollowChild, 0);
+	//
+	//	PIN_AddFollowChildProcessFunction(FollowChild, 0);
 	INS_AddInstrumentFunction(Instruction, 0);
 	PIN_AddSyscallEntryFunction(SyscallEntry, 0);
 	PIN_AddSyscallExitFunction(SyscallExit, 0);
-
-
-	// Write to a file since cout and cerr maybe closed by the application
-	TraceFile.open(KnobOutputFile.Value().c_str());
-	TraceFile << hex;
-	TraceFile.setf(ios::showbase);
-
+	//
+	//
+	//	// Write to a file since cout and cerr maybe closed by the application
+	//	TraceFile.open(KnobOutputFile.Value().c_str());
+	//	TraceFile << hex;
+	//	TraceFile.setf(ios::showbase);
+	//
 	IMG_AddInstrumentFunction(Image, 0);
-
+	//
 	PIN_AddFiniFunction(Fini, 0);
-
+	//
 	set_timer();
 
 	// Never returns
