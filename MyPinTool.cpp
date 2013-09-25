@@ -4,7 +4,7 @@
  */
 
 /*
- * /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/pin -t /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- filebench
+ * /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/pin -follow_execv -t  /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- /usr/local/bin/filebench
  */
 
 #include <stdio.h>
@@ -125,6 +125,8 @@ int pid;
 char *output;
 long unsigned int mmap_base;
 
+PIN_MUTEX lock;
+
 FILE * trace;
 int flag[MAX_THREAD];
 char* per_thread_buf[2][MAX_THREAD];
@@ -156,7 +158,15 @@ typedef struct treeNode
 
 }treeNode;
 
-treeNode *malloc_root, *stack_root[MAX_THREAD];
+typedef struct treeNodeList
+{
+	int threadid;
+	treeNode* root;
+	struct treeNodeList *next;
+} treeNodeList;
+
+treeNode *malloc_root;//, *stack_root;
+treeNodeList *stack_root_list;
 
 VOID InsertLog(treeNode *node, log* log)
 {
@@ -201,7 +211,7 @@ treeNode * Insert(treeNode *node, ADDRINT address, ADDRINT size)
 		temp -> usedforread = FALSE;
 		temp -> log = NULL;
 		temp -> left = temp -> right = NULL;
-		fprintf(stderr, "%d malloced %lx\n", getpid(), address);
+//		fprintf(stderr, "%d malloced %lx\n", getpid(), address);
 		return temp;
 	}
 
@@ -399,7 +409,7 @@ ADDRINT mallocsize[MAX_THREAD];
 
 VOID Arg1Before(CHAR * name, ADDRINT size)
 {
-	int threadid = PIN_GetTid();
+	int threadid = PIN_ThreadId();
 	if(name[0] == 'm')
 	{
 		mallocsize[threadid] = size;
@@ -408,7 +418,7 @@ VOID Arg1Before(CHAR * name, ADDRINT size)
 	{
 		if(size != 0)
 		{
-			fprintf(stderr, "%d free %lx\n", getpid(), size);
+//			fprintf(stderr, "%d free %lx\n", getpid(), size);
 			if(Find(malloc_root, size) == NULL)
 			{
 				fprintf(stderr, "no \n");
@@ -421,7 +431,7 @@ VOID Arg1Before(CHAR * name, ADDRINT size)
 
 VOID MallocAfter(ADDRINT ret)
 {
-	int threadid = PIN_GetTid();
+	int threadid = PIN_ThreadId();
 
 	malloc_root = Insert(malloc_root, ret, mallocsize[threadid]);
 }
@@ -538,7 +548,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	//	struct iovec* vec;
 	//	char buf[MAX_BUFSIZE];
 
-	int threadid = PIN_GetTid();
+	int threadid = PIN_ThreadId();
 	if(per_thread_buf[0][threadid] == NULL)
 	{
 		per_thread_buf[0][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
@@ -563,7 +573,32 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		}
 		else
 		{
-			fprintf(trace, "read at non malloced %.6lf %lx %lx\n", get_timer(), arg1, arg2);
+//			fprintf(trace, "read at non malloced %.6lf %lx %lx\n", get_timer(), arg1, arg2);
+			treeNodeList *list = stack_root_list->next;
+			while(list->threadid != threadid)
+			{
+				list = list->next;
+				if(list == NULL)
+				{
+					fprintf(stderr, "null thread %d\n", threadid);
+					assert(0);
+				}
+			}
+			node = FindInRange(list->root, arg1);
+			if(node != NULL)
+			{
+				log = (struct log*)malloc(sizeof(struct log));
+				log->time = get_timer();
+				log->address = arg1;
+				log->size = arg2;
+				log->isread = TRUE;
+				InsertLog(node, log);
+				node->usedforread = TRUE;
+			}
+			else
+			{
+				fprintf(trace, "read at non malloced %.6lf %lx %lx\n", get_timer(), arg1, arg2);
+			}
 		}
 
 		sprintf(per_thread_buf[0][threadid], "%x %lx %lx %lx %lx ", threadid, num, arg0, arg1, arg2);
@@ -682,7 +717,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 // Print the return value of the system call
 VOID SysAfter(ADDRINT ret, ADDRINT num)
 {
-	int threadid = PIN_GetTid();
+	int threadid = PIN_ThreadId();
 	if(flag[threadid] != 0)
 	{
 		if(!(flag[threadid] == 3 && ((ret+1 == 0) || (ret == 0))))
@@ -720,7 +755,7 @@ VOID SyscallExit(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID
 VOID MemoryRead(ADDRINT ip, ADDRINT memaddr,
 		ADDRINT readsize)
 {
-	int threadid = PIN_GetTid();
+	int threadid = PIN_ThreadId();
 	if(per_thread_buf[0][threadid] == NULL)
 	{
 		per_thread_buf[0][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
@@ -744,39 +779,87 @@ VOID MemoryWrite(ADDRINT ip, ADDRINT memaddr,
 		InsertLog(node, log);
 	}
 }
+VOID StackWrite(ADDRINT ip, ADDRINT memaddr,
+		ADDRINT writesize)
+{
+	int threadid = PIN_ThreadId();
+	treeNodeList *list = stack_root_list->next;
+	while(list->threadid != threadid)
+	{
+		list = list->next;
+		if(list == NULL)
+		{
+			fprintf(stderr, "null thread %d\n", threadid);
+			assert(0);
+		}
+	}
+	treeNode *node = FindInRange(list->root, memaddr);
+	if(node != NULL)
+	{
+		//		fprintf(trace, "wirte size %lx\n", writesize);
+		struct log* log = (struct log*)malloc(sizeof(struct log));
+		log->time = get_timer();
+		log->address = memaddr;
+		log->size = writesize;
+		log->isread = FALSE;
+		InsertLog(node, log);
+	}
+}
 
 VOID FreeStack(int threadid, ADDRINT sp)
 {
-	treeNode *node = FindMin(stack_root[threadid]);
+	treeNodeList *list = stack_root_list->next;
+	while(list->threadid != threadid)
+	{
+		list = list->next;
+	}
+	treeNode *node = FindMin(list->root);
 	while(node != NULL && node->address < sp)
 	{
-		stack_root[threadid] = Delete(stack_root[threadid], node->address);
-		node = FindMin(stack_root[threadid]);
+		list->root = Delete(list->root, node->address);
+		node = FindMin(list->root);
 	}
 }
 
 VOID Return(ADDRINT sp)
 {
-	int threadid = PIN_GetTid();
-	fprintf(stderr, "ret\n");
+	int threadid = PIN_ThreadId();
 	FreeStack(threadid, sp);
 }
 
 // Is called for every instruction and instruments syscalls
 VOID Instruction(INS ins, VOID *v)
 {
-	if(INS_Valid(ins) && INS_IsMemoryWrite(ins) && !(INS_IsStackWrite(ins) || INS_IsBranchOrCall(ins)))
+	if(INS_Valid(ins) && INS_IsMemoryWrite(ins))// && !(INS_IsStackWrite(ins) || INS_IsBranchOrCall(ins)))
 	{
-		int threadid = PIN_GetTid();
+		int threadid = PIN_ThreadId();
 		if(per_thread_buf[0][threadid] == NULL)
 		{
 			per_thread_buf[0][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
 		}
-		INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(MemoryWrite),
-				IARG_INST_PTR,
-				IARG_MEMORYWRITE_EA,
-				IARG_MEMORYWRITE_SIZE,
+		if(INS_IsStackWrite(ins))
+		{
+			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(StackWrite),
+					IARG_INST_PTR,
+					IARG_MEMORYWRITE_EA,
+					IARG_MEMORYWRITE_SIZE,
+					IARG_END);
+		}
+		else
+		{
+			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(MemoryWrite),
+					IARG_INST_PTR,
+					IARG_MEMORYWRITE_EA,
+					IARG_MEMORYWRITE_SIZE,
+					IARG_END);
+		}
+	}
+	else if (INS_IsRet(ins))
+	{
+		INS_InsertCall(ins, IPOINT_TAKEN_BRANCH, AFUNPTR(Return),
+				IARG_REG_VALUE, REG_STACK_PTR,
 				IARG_END);
+
 	}
 	if (INS_IsSyscall(ins) && INS_HasFallThrough(ins))
 	{
@@ -793,19 +876,12 @@ VOID Instruction(INS ins, VOID *v)
 				IARG_SYSRET_VALUE,
 				IARG_END);
 	}
-	if (INS_IsRet(ins) && INS_HasFallThrough(ins))
-	{
-		INS_InsertCall(ins, IPOINT_AFTER, AFUNPTR(Return),
-				IARG_REG_VALUE, REG_STACK_PTR,
-				IARG_END);
-
-	}
 //	PIN_GetContextReg(ctxt, REG_STACK_PTR)
 }
 
 VOID Fini(INT32 code, VOID *v)
 {
-	fprintf(trace, "%x %x\n", PIN_GetTid(), PROCESSEND);
+	fprintf(trace, "%x %x\n", PIN_ThreadId(), PROCESSEND);
 	while(malloc_root != NULL)
 	{
 		fprintf(stderr, "fini\n");
@@ -830,14 +906,44 @@ BOOL FollowChild(CHILD_PROCESS chidProcess, VOID *userData)
 	return TRUE;
 }
 
+unsigned int threadcnt = 0;
+unsigned int threadlistsize = 0;
+
+VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
+{
+	treeNodeList *list = (treeNodeList*)malloc(sizeof(treeNodeList));
+	assert(list != NULL);
+	list->root = NULL;
+	list->threadid = threadIndex;
+	fprintf(stderr, "thread %d start\n", list->threadid);
+	PIN_MutexLock(&lock);
+	list->next = stack_root_list->next;
+	stack_root_list->next = list;
+	PIN_MutexUnlock(&lock);
+}
 
 VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 {
-	int threadid = PIN_GetTid();
+	int threadid = threadIndex;
 	char buf[100];
 	sprintf(buf, "%x %x thread end\n", threadid, THREADEND);
 	fprintf(trace, "%s", buf);
 	fflush(trace);
+
+	fprintf(stderr, "thread %d end\n", threadid);
+
+	PIN_MutexLock(&lock);
+	treeNodeList *list = stack_root_list;
+	while(list->next->threadid != threadid)
+		list = list->next;
+	treeNodeList *target = list->next;
+	list->next = target->next;
+	while(target->root != NULL)
+	{
+		target->root = Delete(target->root, target->root->address);
+	}
+	free(target);
+	PIN_MutexUnlock(&lock);
 }
 
 /* ===================================================================== */
@@ -884,16 +990,22 @@ int main(int argc, char *argv[])
 	fprintf(trace, "%x\n", pid);
 
 	root_thread = (struct thread*)malloc(sizeof(struct thread));
-	root_thread->tid = PIN_GetTid();
+	root_thread->tid = PIN_ThreadId();
 	root_thread->parent = NULL;
 	root_thread->children = NULL;
 	root_thread->fd_own = NULL;
 	root_thread->fd_inherit = NULL;
+
+	stack_root_list = (treeNodeList*)malloc(sizeof(treeNodeList));
 	//
 	//	PIN_AddFollowChildProcessFunction(FollowChild, 0);
 	INS_AddInstrumentFunction(Instruction, 0);
 	PIN_AddSyscallEntryFunction(SyscallEntry, 0);
 	PIN_AddSyscallExitFunction(SyscallExit, 0);
+	PIN_MutexInit(&lock);
+	PIN_AddThreadStartFunction(ThreadStart, 0);
+	PIN_AddThreadFiniFunction(ThreadFini, 0);
+
 	//
 	//
 	//	// Write to a file since cout and cerr maybe closed by the application
