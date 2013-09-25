@@ -1,10 +1,39 @@
 /*BEGIN_LEGAL
+Intel Open Source License
+
+Copyright (c) 2002-2013 Intel Corporation. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.  Redistributions
+in binary form must reproduce the above copyright notice, this list of
+conditions and the following disclaimer in the documentation and/or
+other materials provided with the distribution.  Neither the name of
+the Intel Corporation nor the names of its contributors may be used to
+endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE INTEL OR
+ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+END_LEGAL */
 /*
  *  This file contains an ISA-portable PIN tool for tracing system calls
  */
 
 /*
- * /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/pin -follow_execv -t  /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- /usr/local/bin/filebench
+ * /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/pin -t /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- filebench
  */
 
 #include <stdio.h>
@@ -574,6 +603,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		else
 		{
 //			fprintf(trace, "read at non malloced %.6lf %lx %lx\n", get_timer(), arg1, arg2);
+			PIN_MutexLock(&lock);
 			treeNodeList *list = stack_root_list->next;
 			while(list->threadid != threadid)
 			{
@@ -584,6 +614,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 					assert(0);
 				}
 			}
+			PIN_MutexUnlock(&lock);
 			node = FindInRange(list->root, arg1);
 			if(node != NULL)
 			{
@@ -783,6 +814,7 @@ VOID StackWrite(ADDRINT ip, ADDRINT memaddr,
 		ADDRINT writesize)
 {
 	int threadid = PIN_ThreadId();
+	PIN_MutexLock(&lock);
 	treeNodeList *list = stack_root_list->next;
 	while(list->threadid != threadid)
 	{
@@ -793,6 +825,7 @@ VOID StackWrite(ADDRINT ip, ADDRINT memaddr,
 			assert(0);
 		}
 	}
+	PIN_MutexUnlock(&lock);
 	treeNode *node = FindInRange(list->root, memaddr);
 	if(node != NULL)
 	{
@@ -808,11 +841,13 @@ VOID StackWrite(ADDRINT ip, ADDRINT memaddr,
 
 VOID FreeStack(int threadid, ADDRINT sp)
 {
+	PIN_MutexLock(&lock);
 	treeNodeList *list = stack_root_list->next;
 	while(list->threadid != threadid)
 	{
 		list = list->next;
 	}
+	PIN_MutexUnlock(&lock);
 	treeNode *node = FindMin(list->root);
 	while(node != NULL && node->address < sp)
 	{
@@ -830,7 +865,7 @@ VOID Return(ADDRINT sp)
 // Is called for every instruction and instruments syscalls
 VOID Instruction(INS ins, VOID *v)
 {
-	if(INS_Valid(ins) && INS_IsMemoryWrite(ins))// && !(INS_IsStackWrite(ins) || INS_IsBranchOrCall(ins)))
+	if(INS_Valid(ins) && INS_IsMemoryWrite(ins)) //&& !(INS_IsStackWrite(ins) || INS_IsBranchOrCall(ins)))
 	{
 		int threadid = PIN_ThreadId();
 		if(per_thread_buf[0][threadid] == NULL)
@@ -854,7 +889,7 @@ VOID Instruction(INS ins, VOID *v)
 					IARG_END);
 		}
 	}
-	else if (INS_IsRet(ins))
+	if (INS_IsRet(ins))
 	{
 		INS_InsertCall(ins, IPOINT_TAKEN_BRANCH, AFUNPTR(Return),
 				IARG_REG_VALUE, REG_STACK_PTR,
@@ -888,6 +923,7 @@ VOID Fini(INT32 code, VOID *v)
 		malloc_root = Delete(malloc_root, malloc_root->address);
 	}
 	fclose(trace);
+	PIN_MutexFini(&lock);
 }
 
 /* ===================================================================== */
