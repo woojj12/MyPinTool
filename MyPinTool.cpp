@@ -10,7 +10,7 @@ met:
 Redistributions of source code must retain the above copyright notice,
 this list of conditions and the following disclaimer.  Redistributions
 in binary form must reproduce the above copyright notice, this list of
-conditions and the following disclaimer in the documentation and/or
+conditions and the following disclaimer in the documentation and/orpw
 other materials provided with the distribution.  Neither the name of
 the Intel Corporation nor the names of its contributors may be used to
 endorse or promote products derived from this software without
@@ -33,8 +33,8 @@ END_LEGAL */
  */
 
 /*
- * /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/pin -t /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- filebench
- * /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/pin -follow_execv -t /home/jungjae/pin-2.12-58423-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- filebench
+ * /home/jungjae/pin-2.13-61206-gcc.4.4.7-linux/pin -t /home/jungjae/pin-2.13-61206-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- filebench
+ * /home/jungjae/pin-2.13-61206-gcc.4.4.7-linux/pin -follow_execv -t /home/jungjae/pin-2.13-61206-gcc.4.4.7-linux/source/tools/MyPinTool/obj-intel64/MyPinTool.so -- filebench
  *
  */
 
@@ -191,7 +191,7 @@ typedef struct treeNode
 
 typedef struct treeNodeList
 {
-	int threadid;
+	OS_THREAD_ID threadid;
 	treeNode* root;
 	struct treeNodeList *next;
 } treeNodeList;
@@ -395,7 +395,7 @@ VOID PrintInorder(treeNode *node)
 		return;
 	}
 	PrintInorder(node->left);
-	printf("%ld ",node->address);
+	printf("%lx ",node->address);
 	PrintInorder(node->right);
 }
 
@@ -405,7 +405,7 @@ VOID PrintPreorder(treeNode *node)
 	{
 		return;
 	}
-	printf("%ld ",node->address);
+	printf("%lx ",node->address);
 	PrintPreorder(node->left);
 	PrintPreorder(node->right);
 }
@@ -418,7 +418,7 @@ VOID PrintPostorder(treeNode *node)
 	}
 	PrintPostorder(node->left);
 	PrintPostorder(node->right);
-	printf("%ld ",node->address);
+	printf("%lx ",node->address);
 }
 
 /* ===================================================================== */
@@ -438,13 +438,13 @@ ADDRINT mallocsize[MAX_THREAD];
 
 VOID MallocBefore(ADDRINT size)
 {
-	int threadid = PIN_ThreadId();
+	OS_THREAD_ID threadid = PIN_GetTid();
 	mallocsize[threadid] = size;
 }
 
 VOID FreeBefore(ADDRINT size)
 {
-//	int threadid = PIN_ThreadId();
+//	OS_THREAD_ID threadid = PIN_GetTid();
 	if(size != 0)
 	{
 		if(Find(malloc_root, size) != NULL)
@@ -454,7 +454,7 @@ VOID FreeBefore(ADDRINT size)
 
 VOID MallocAfter(ADDRINT ret)
 {
-	int threadid = PIN_ThreadId();
+	OS_THREAD_ID threadid = PIN_GetTid();
 
 	malloc_root = Insert(malloc_root, ret, mallocsize[threadid]);
 }
@@ -542,7 +542,7 @@ double get_timer() {
 
 struct thread
 {
-	THREADID tid;
+	OS_THREAD_ID tid;
 	struct thread *parent;
 	struct thread_list *children;
 	struct fd_list *fd_own;
@@ -569,7 +569,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	//	struct iovec* vec;
 	//	char buf[MAX_BUFSIZE];
 
-	int threadid = PIN_ThreadId();
+	OS_THREAD_ID threadid = PIN_GetTid();
 	if(per_thread_buf[0][threadid] == NULL)
 	{
 		per_thread_buf[0][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
@@ -595,7 +595,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 				list = list->next;
 				if(list == NULL)
 				{
-					fprintf(stderr, "null thread %d\n", threadid);
+					fprintf(stderr, "null thread %x\n", threadid);
 					assert(0);
 				}
 			}
@@ -754,7 +754,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 // Print the return value of the system call
 VOID SysAfter(ADDRINT ret, ADDRINT num)
 {
-	int threadid = PIN_ThreadId();
+	OS_THREAD_ID threadid = PIN_GetTid();
 	if(flag[threadid] != 0)
 	{
 		if(!(flag[threadid] == 3 && ((ret+1 == 0) || (ret == 0))))
@@ -793,7 +793,7 @@ VOID SyscallExit(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID
 VOID MemoryRead(ADDRINT ip, ADDRINT memaddr,
 		ADDRINT readsize)
 {
-	int threadid = PIN_ThreadId();
+	OS_THREAD_ID threadid = PIN_GetTid();
 	if(per_thread_buf[0][threadid] == NULL)
 	{
 		per_thread_buf[0][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
@@ -820,16 +820,20 @@ VOID MemoryWrite(ADDRINT ip, ADDRINT memaddr,
 VOID StackWrite(ADDRINT ip, ADDRINT memaddr,
 		ADDRINT writesize)
 {
-	int threadid = PIN_ThreadId();
+	OS_THREAD_ID threadid = PIN_GetTid();
 	PIN_MutexLock(&lock);
 	treeNodeList *list = stack_root_list->next;
+//	fprintf(stderr, "stack write\n");
 	while(list->threadid != threadid)
 	{
+//		fprintf(stderr, "%x\n", list->threadid);
 		list = list->next;
 		if(list == NULL)
 		{
-			fprintf(stderr, "null thread %d\n", threadid);
-			assert(0);
+//			fprintf(stderr, "null thread %x\n", threadid);
+			PIN_MutexUnlock(&lock);
+//			assert(0);
+			return;
 		}
 	}
 	PIN_MutexUnlock(&lock);
@@ -846,7 +850,7 @@ VOID StackWrite(ADDRINT ip, ADDRINT memaddr,
 	}
 }
 
-VOID FreeStack(int threadid, ADDRINT sp)
+VOID FreeStack(OS_THREAD_ID threadid, ADDRINT sp)
 {
 	PIN_MutexLock(&lock);
 	treeNodeList *list = stack_root_list->next;
@@ -866,7 +870,7 @@ VOID FreeStack(int threadid, ADDRINT sp)
 
 VOID Return(ADDRINT sp)
 {
-	int threadid = PIN_ThreadId();
+	OS_THREAD_ID threadid = PIN_GetTid();
 	FreeStack(threadid, sp);
 }
 
@@ -875,19 +879,19 @@ VOID Instruction(INS ins, VOID *v)
 {
 	if(INS_Valid(ins) && INS_IsMemoryWrite(ins)) //&& !(INS_IsStackWrite(ins) || INS_IsBranchOrCall(ins)))
 	{
-		int threadid = PIN_ThreadId();
+		OS_THREAD_ID threadid = PIN_GetTid();
 		if(per_thread_buf[0][threadid] == NULL)
 		{
 			per_thread_buf[0][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
 		}
-		if(INS_IsStackWrite(ins))
-		{
-			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(StackWrite),
-					IARG_INST_PTR,
-					IARG_MEMORYWRITE_EA,
-					IARG_MEMORYWRITE_SIZE,
-					IARG_END);
-		}
+//		if(INS_IsStackWrite(ins))
+//		{
+//			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(StackWrite),
+//					IARG_INST_PTR,
+//					IARG_MEMORYWRITE_EA,
+//					IARG_MEMORYWRITE_SIZE,
+//					IARG_END);
+//		}
 //		else
 //		{
 //			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(MemoryWrite),
@@ -924,7 +928,7 @@ VOID Instruction(INS ins, VOID *v)
 
 VOID Fini(INT32 code, VOID *v)
 {
-	fprintf(trace, "%x %x\n", PIN_ThreadId(), PROCESSEND);
+	fprintf(trace, "%x %x\n", PIN_GetTid(), PROCESSEND);
 	while(malloc_root != NULL)
 	{
 		malloc_root = Delete(malloc_root, malloc_root->address);
@@ -957,7 +961,8 @@ VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 	treeNodeList *list = (treeNodeList*)malloc(sizeof(treeNodeList));
 	assert(list != NULL);
 	list->root = NULL;
-	list->threadid = threadIndex;
+	list->threadid = PIN_GetTid();
+	fprintf(trace, "thread %x\n", list->threadid);
 	PIN_MutexLock(&lock);
 	list->next = stack_root_list->next;
 	stack_root_list->next = list;
@@ -966,7 +971,7 @@ VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 
 VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 {
-	int threadid = threadIndex;
+	OS_THREAD_ID threadid = PIN_GetTid();
 	char buf[100];
 	sprintf(buf, "%x %x thread end\n", threadid, THREADEND);
 	fprintf(trace, "%s", buf);
@@ -1015,6 +1020,12 @@ int main(int argc, char *argv[])
 
 	printf("%16lx\n", mmap_base);
 
+	char buf[100];
+	pid = readlink("/proc/self/exe", buf, 100);
+	printf("%s\n\n", buf);
+
+
+
 	// Initialize pin & symbol manager
 	PIN_InitSymbols();
 
@@ -1030,7 +1041,8 @@ int main(int argc, char *argv[])
 	fprintf(trace, "%x\n", pid);
 
 	root_thread = (struct thread*)malloc(sizeof(struct thread));
-	root_thread->tid = PIN_ThreadId();
+	root_thread->tid = PIN_GetTid();
+	printf("%x\n", root_thread->tid);
 	root_thread->parent = NULL;
 	root_thread->children = NULL;
 	root_thread->fd_own = NULL;
@@ -1064,3 +1076,6 @@ int main(int argc, char *argv[])
 
 	return 0;
 }
+
+
+
