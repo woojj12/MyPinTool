@@ -46,6 +46,7 @@ END_LEGAL */
 #include <sys/uio.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <errno.h>
@@ -547,6 +548,8 @@ struct thread
 	struct thread_list *children;
 	struct fd_list *fd_own;
 	struct fd_list *fd_inherit;
+	int flag;
+	char buf[MAX_BUFSIZE];
 };
 struct thread *root_thread;
 
@@ -884,22 +887,22 @@ VOID Instruction(INS ins, VOID *v)
 		{
 			per_thread_buf[0][threadid] = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
 		}
-//		if(INS_IsStackWrite(ins))
-//		{
-//			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(StackWrite),
-//					IARG_INST_PTR,
-//					IARG_MEMORYWRITE_EA,
-//					IARG_MEMORYWRITE_SIZE,
-//					IARG_END);
-//		}
-//		else
-//		{
-//			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(MemoryWrite),
-//					IARG_INST_PTR,
-//					IARG_MEMORYWRITE_EA,
-//					IARG_MEMORYWRITE_SIZE,
-//					IARG_END);
-//		}
+		if(INS_IsStackWrite(ins))
+		{
+			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(StackWrite),
+					IARG_INST_PTR,
+					IARG_MEMORYWRITE_EA,
+					IARG_MEMORYWRITE_SIZE,
+					IARG_END);
+		}
+		else
+		{
+			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(MemoryWrite),
+					IARG_INST_PTR,
+					IARG_MEMORYWRITE_EA,
+					IARG_MEMORYWRITE_SIZE,
+					IARG_END);
+		}
 	}
 	if (INS_IsRet(ins))
 	{
@@ -998,32 +1001,42 @@ VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 int main(int argc, char *argv[])
 {
 
-	size_t length = 1024*1024;
-	off_t offset = 0;
-	int fd = open("./jim.mymemory", O_RDWR| O_CREAT, S_IRUSR| S_IWUSR );
-	if (fd == 0) {
-		int myerr = errno;
-		printf("ERROR: open failed (errno %d %s)\n", myerr, strerror(myerr));
-		return EXIT_FAILURE;
-	}
-	if (lseek(fd, length - 1, SEEK_SET) == -1) {
-		int myerr = errno;
-		printf("ERROR: lseek failed (errno %d %s)\n", myerr, strerror(myerr));
-		return EXIT_FAILURE;
-	}
+//	size_t length = 1024*1024;
+//	off_t offset = 0;
+//	int fd = open("./jim.mymemory", O_RDWR| O_CREAT, S_IRUSR| S_IWUSR );
+//	if (fd == 0) {
+//		int myerr = errno;
+//		printf("ERROR: open failed (errno %d %s)\n", myerr, strerror(myerr));
+//		return EXIT_FAILURE;
+//	}
+//	if (lseek(fd, length - 1, SEEK_SET) == -1) {
+//		int myerr = errno;
+//		printf("ERROR: lseek failed (errno %d %s)\n", myerr, strerror(myerr));
+//		return EXIT_FAILURE;
+//	}
+//
+//
+//	pid = write(fd, "", 1);
+//	int prot = (PROT_READ| PROT_WRITE);
+//	int flags = MAP_SHARED;
+//	mmap_base = (long unsigned int)mmap(NULL, length, prot, flags, fd, offset);
+//
+//	printf("%16lx\n", mmap_base);
 
-
-	pid = write(fd, "", 1);
-	int prot = (PROT_READ| PROT_WRITE);
-	int flags = MAP_SHARED;
-	mmap_base = (long unsigned int)mmap(NULL, length, prot, flags, fd, offset);
-
-	printf("%16lx\n", mmap_base);
-
-	char buf[100];
-	pid = readlink("/proc/self/exe", buf, 100);
-	printf("%s\n\n", buf);
-
+//	char buf[100];
+//	pid = readlink("/proc/self/exe", buf, 100);
+//	printf("%s\n\n", buf);
+//	int status;
+//	int tid = fork();
+//	if(tid == 0)
+//	{
+//		//child
+//		execlp("../size.sh", "size.sh", buf, PIN_GetTid(), (char*)NULL);
+//	}
+//	else
+//	{
+//		tid = waitpid(-1, &status, 0);
+//	}
 
 
 	// Initialize pin & symbol manager
