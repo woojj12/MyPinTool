@@ -1,4 +1,4 @@
-/*BEGIN_LEGAL
+
 /*
  *  This file contains an ISA-portable PIN tool for tracing system calls
  */
@@ -20,6 +20,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <errno.h>
+
+#include <sched.h>
 
 #if defined(TARGET_MAC)
 #include <sys/syscall.h>
@@ -45,6 +47,7 @@
 #define MALLOC "malloc"
 #define FREE "free"
 #define REALLOC "realloc"
+#define CALLOC "calloc"
 #endif
 
 //linux kernel 3.10
@@ -106,21 +109,54 @@
 #define MAX_THREAD 100000
 #define MAX_BUFSIZE	1024
 
-#define THREADSTART 1000
+#define THREADSTART 1000	//3e8
 #define THREADEND	1001
 #define PROCESSEND	1002
 
-#define _MALLOC	2000
+#define _MALLOC	2000	//7d0
 #define _FREE	2001
 #define MEMORY	2002
 #define STACK	2003
-#define RETURN	2004
+#define RETURN	2004	//7d4
 
-#define MALLOC_READ	3000
+#define MALLOC_READ	3000	//bb8
 #define STACK_READ	3001
 #define DATA_READ	3002
 
 #define PAGE_SIZE	4096
+
+/*
+ * Clone Flags
+ */
+//# define CSIGNAL       0x000000ff /* Signal mask to be sent at exit.  */
+//# define CLONE_VM      0x00000100 /* Set if VM shared between processes.  */
+//# define CLONE_FS      0x00000200 /* Set if fs info shared between processes.  */
+//# define CLONE_FILES   0x00000400 /* Set if open files shared between processes.  */
+//# define CLONE_SIGHAND 0x00000800 /* Set if signal handlers shared.  */
+//# define CLONE_PTRACE  0x00002000 /* Set if tracing continues on the child.  */
+//# define CLONE_VFORK   0x00004000 /* Set if the parent wants the child to
+//				     wake it up on mm_release.  */
+//# define CLONE_PARENT  0x00008000 /* Set if we want to have the same
+//				     parent as the cloner.  */
+//# define CLONE_THREAD  0x00010000 /* Set to add to same thread group.  */
+//# define CLONE_NEWNS   0x00020000 /* Set to create new namespace.  */
+//# define CLONE_SYSVSEM 0x00040000 /* Set to shared SVID SEM_UNDO semantics.  */
+//# define CLONE_SETTLS  0x00080000 /* Set TLS info.  */
+//# define CLONE_PARENT_SETTID 0x00100000 /* Store TID in userlevel buffer
+//					   before MM copy.  */
+//# define CLONE_CHILD_CLEARTID 0x00200000 /* Register exit futex and memory
+//					    location to clear.  */
+//# define CLONE_DETACHED 0x00400000 /* Create clone detached.  */
+//# define CLONE_UNTRACED 0x00800000 /* Set if the tracing process can't
+//				      force CLONE_PTRACE on this clone.  */
+//# define CLONE_CHILD_SETTID 0x01000000 /* Store TID in userlevel buffer in
+//					  the child.  */
+//# define CLONE_NEWUTS	0x04000000	/* New utsname group.  */
+//# define CLONE_NEWIPC	0x08000000	/* New ipcs.  */
+//# define CLONE_NEWUSER	0x10000000	/* New user namespace.  */
+//# define CLONE_NEWPID	0x20000000	/* New pid namespace.  */
+//# define CLONE_NEWNET	0x40000000	/* New network namespace.  */
+//# define CLONE_IO	0x80000000	/* Clone I/O context.  */
 
 /* ===================================================================== */
 /* Global Variables */
@@ -129,12 +165,16 @@ void* globalReserve = NULL;
 static const size_t ReserveSize = 256*1024*1024;
 volatile BOOL isOutOfMemCalled = FALSE;
 
+long unsigned int pagesize;
+
+BOOL process_fini;
+
 int pid;
 char *output;
 
 FILE * trace;
 
-PIN_MUTEX lock;
+PIN_MUTEX thread_lock, malloc_lock, data_lock;
 
 /////////////////////////////////////////////////
 
@@ -162,43 +202,44 @@ VOID OutOfMem(size_t size, VOID* v)
         //    globalReserve = malloc(ReserveSize / 2);
         //}
     }
+    size = CLONE_FILES;
 }
 
-struct timeval lt;
-static int first = 1;
-
-void set_timer() {
-
-	if (first) {
-
-		gettimeofday(&lt, NULL);
-
-		first = 0;
-
-	}
-
-}
-
-double get_timer() {
-
-	struct timeval tt;
-
-	double lap_time;
-
-	if (first) {
-
-		set_timer();
-
-		return 0.0;
-
-	}
-
-	gettimeofday(&tt, NULL);
-
-	lap_time = (double)(tt.tv_sec - lt.tv_sec) + (double)(tt.tv_usec - lt.tv_usec)/1000000.0;
-
-	return lap_time;
-}
+//struct timeval lt;
+//static int first = 1;
+//
+//void set_timer() {
+//
+//	if (first) {
+//
+//		gettimeofday(&lt, NULL);
+//
+//		first = 0;
+//
+//	}
+//
+//}
+//
+//double get_timer() {
+//
+//	struct timeval tt;
+//
+//	double lap_time;
+//
+//	if (first) {
+//
+//		set_timer();
+//
+//		return 0.0;
+//
+//	}
+//
+//	gettimeofday(&tt, NULL);
+//
+//	lap_time = (double)(tt.tv_sec - lt.tv_sec) + (double)(tt.tv_usec - lt.tv_usec)/1000000.0;
+//
+//	return lap_time;
+//}
 
 typedef struct treeNode
 {
@@ -211,15 +252,7 @@ typedef struct treeNode
 
 }treeNode;
 
-typedef struct treeNodeList
-{
-	OS_THREAD_ID threadid;
-	treeNode* root;
-	struct treeNodeList *next;
-} treeNodeList;
-
 treeNode *malloc_root, *data_root;//, *stack_root;
-//treeNodeList *stack_root_list;
 
 treeNode* FindMinAddress(treeNode *node)
 {
@@ -302,7 +335,7 @@ treeNode * InsertMAddress(treeNode *node, ADDRINT address, ADDRINT size)
 	else
 	{
 		fprintf(stderr, "%x %lx %lx\n", PIN_GetTid(), address, size);
-//		assert(0);
+		assert(0);
 	}
 	/* Else there is nothing to do as the data is already in the tree. */
 	return node;
@@ -343,7 +376,14 @@ treeNode * DeleteAddress(treeNode *node, ADDRINT address)
 {
 	treeNode *temp;
 	if(node == NULL)
+	{
+		assert(0);
 		return NULL;
+	}
+	if(process_fini)
+	{
+		fprintf(stderr, "delete %lx %lx\n", address, node->address);
+	}
 //	if(node == NULL)
 //	{
 //		fprintf(stderr, "%x %x delete err %lx\n", getpid(), PIN_GetTid(), address);
@@ -351,10 +391,18 @@ treeNode * DeleteAddress(treeNode *node, ADDRINT address)
 //	}
 	if(address < node->address)
 	{
+		if(process_fini)
+		{
+			fprintf(stderr, "delete left\n");
+		}
 		node->left = DeleteAddress(node->left, address);
 	}
 	else if(address > node->address)
 	{
+		if(process_fini)
+		{
+			fprintf(stderr, "delete right\n");
+		}
 		node->right = DeleteAddress(node->right, address);
 	}
 	else
@@ -363,6 +411,10 @@ treeNode * DeleteAddress(treeNode *node, ADDRINT address)
                    in the right sub tree or maximum element in the left subtree */
 		if(node->right && node->left)
 		{
+			if(process_fini)
+			{
+				fprintf(stderr, "delete not end\n");
+			}
 			/* Here we will replace with minimum element in the right sub tree */
 			temp = FindMinAddress(node->right);
 			node -> address = temp->address;
@@ -374,6 +426,10 @@ treeNode * DeleteAddress(treeNode *node, ADDRINT address)
 		}
 		else
 		{
+			if(process_fini)
+			{
+				fprintf(stderr, "delete end\n");
+			}
 			/* If there is only one or zero children then we can directly
                            remove it from the tree and connect its parent to its child */
 			temp = node;
@@ -381,6 +437,8 @@ treeNode * DeleteAddress(treeNode *node, ADDRINT address)
 				node = node->right;
 			else if(node->right == NULL)
 				node = node->left;
+			else
+				assert(0);
 			free(temp); /* temp is longer required */
 		}
 	}
@@ -423,7 +481,7 @@ treeNode* FindAddressInRange(treeNode *node, ADDRINT address)
 		/* target node. */
 		return FindAddressInRange(node->right,address);
 	}
-	if(address >= node->address)
+	else if(address >= node->address)
 	{
 		/* Search in the right sub tree. */
 		return node;
@@ -437,65 +495,13 @@ treeNode* FindAddressInRange(treeNode *node, ADDRINT address)
 
 ///////////////////////////////////////////////////////////////////
 
-//struct read
-//{
-//	ADDRINT addr;
-//	ADDRINT size;
-//	struct read *next;
-//};
-////struct read *root_read = NULL;
-//struct read *data_read;
-//
-//struct read* InsertRead(struct read* node, ADDRINT addr, ADDRINT size)
-//{
-//	struct read* new_node;
-//	if(node == NULL)
-//	{
-//		node = (struct read*)malloc(sizeof(struct read));
-//		node->addr = addr;
-//		node->size = size;
-//		node->next = NULL;
-//	}
-//	else if(node->addr == addr)
-//	{
-//		if(node->size < size)
-//		{
-//			node->size = size;
-//		}
-//	}
-//	else if(node->addr < addr)
-//	{
-//		new_node = (struct read*)malloc(sizeof(struct read));
-//		new_node->addr = addr;
-//		new_node->size = size;
-//		new_node->next = node;
-//		return new_node;
-//	}
-//	else
-//	{
-//		node->next = InsertRead(node->next, addr, size);
-//	}
-//	return node;
-//}
-//
-//struct read* FindRead(ADDRINT addr, struct read* node)
-//{
-//	if(node == NULL || node->addr > addr)
-//		return NULL;
-//	else if(node->addr <= addr && addr <= node->addr + node->size)
-//	{
-//		return node;
-//	}
-//	else
-//		return FindRead(addr, node->next);
-//}
-
 struct thread
 {
 	PIN_THREAD_UID tid;
 	char *buffer;
 	int flag;
 	ADDRINT mallocsize;
+	ADDRINT reallocsize;
 //	ADDRINT sp;
 	treeNode *stack;
 	struct thread *left, *right;
@@ -598,9 +604,11 @@ struct thread* DeleteThread(PIN_THREAD_UID threadid, struct thread*node)
 			/* Here we will replace with minimum element in the right sub tree */
 			temp = FindMinThread(node->right);
 			node -> tid = temp->tid;
+			node->stack = temp->stack;
 			free(node->buffer);
 			node->buffer = temp->buffer;
 			node->flag = temp->flag;
+			node->mallocsize = temp->mallocsize;
 
 			/* As we replaced it with some other node, we have to delete that node */
 			node -> right = DeleteThread(temp->tid, node->right);
@@ -624,53 +632,98 @@ struct thread* DeleteThread(PIN_THREAD_UID threadid, struct thread*node)
 VOID MallocBefore(ADDRINT size)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	PIN_MutexLock(&lock);
+	PIN_MutexLock(&thread_lock);
 	struct thread *thread = FindThread(threadid);
-	PIN_MutexUnlock(&lock);
+	PIN_MutexUnlock(&thread_lock);
 	thread->mallocsize = size;
+
+	fprintf(stderr, "%lx malloc %lx\n", PIN_ThreadUid(), size);
+}
+
+VOID MallocAfter(ADDRINT addr)
+{
+	PIN_THREAD_UID threadid = PIN_ThreadUid();
+	PIN_MutexLock(&thread_lock);
+	struct thread *thread = FindThread(threadid);
+	PIN_MutexUnlock(&thread_lock);
+	fprintf(trace, "%lx %x %lx %lx\n", threadid, _MALLOC, thread->mallocsize, addr);
+	PIN_MutexLock(&malloc_lock);
+	malloc_root = InsertMAddress(malloc_root, addr, thread->mallocsize);
+	PIN_MutexUnlock(&malloc_lock);
+	fprintf(stderr, "%lx malloc after %lx %lx\n", PIN_ThreadUid(), addr, thread->mallocsize);
+
+	thread->mallocsize = 0;
+}
+
+VOID CallocBefore(ADDRINT c, ADDRINT size)
+{
+	PIN_THREAD_UID threadid = PIN_ThreadUid();
+	PIN_MutexLock(&thread_lock);
+	struct thread *thread = FindThread(threadid);
+	PIN_MutexUnlock(&thread_lock);
+	thread->mallocsize = c * size;
+	fprintf(stderr, "%lx calloc %lx %lx %lx\n", PIN_ThreadUid(), c, size, c*size);
+}
+
+VOID CallocAfter(ADDRINT addr)
+{
+	PIN_THREAD_UID threadid = PIN_ThreadUid();
+	PIN_MutexLock(&thread_lock);
+	struct thread *thread = FindThread(threadid);
+	PIN_MutexUnlock(&thread_lock);
+	fprintf(trace, "%lx %x %lx %lx\n", threadid, _MALLOC, thread->mallocsize, addr);
+	PIN_MutexLock(&malloc_lock);
+	malloc_root = InsertMAddress(malloc_root, addr, thread->mallocsize);
+	PIN_MutexUnlock(&malloc_lock);
+	fprintf(stderr, "%lx calloc after %lx %lx\n", PIN_ThreadUid(), addr, thread->mallocsize);
+
+	thread->mallocsize = 0;
 }
 
 VOID FreeBefore(ADDRINT addr)
 {
 	if(addr != 0)
 	{
+		PIN_MutexLock(&malloc_lock);
 		malloc_root = DeleteAddress(malloc_root, addr);
+		PIN_MutexUnlock(&malloc_lock);
 		fprintf(trace, "%lx %x %lx\n", PIN_ThreadUid(), _FREE, addr);
 	}
-}
-
-VOID MallocAfter(ADDRINT addr)
-{
-	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	PIN_MutexLock(&lock);
-	struct thread *thread = FindThread(threadid);
-	fprintf(trace, "%lx %x %lx %lx\n", threadid, _MALLOC, thread->mallocsize, addr);
-	malloc_root = InsertMAddress(malloc_root, addr, thread->mallocsize);
-	PIN_MutexUnlock(&lock);
 }
 
 VOID ReallocBefore(ADDRINT ptr, ADDRINT size)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	PIN_MutexLock(&lock);
+	PIN_MutexLock(&thread_lock);
 	struct thread *thread = FindThread(threadid);
-	treeNode *node = FindAddress(malloc_root, ptr);
-	assert(node);
-	fprintf(stderr, "realloc %lx %lx %lx\n", ptr, node->size, size);
-	PIN_MutexUnlock(&lock);
-	malloc_root = DeleteAddress(malloc_root, size);
-	thread->mallocsize = size;
+	PIN_MutexUnlock(&thread_lock);
+//	assert(0);
+
+	fprintf(stderr, "%lx realloc %lx %lx\n", PIN_ThreadUid(), ptr, size);
+
+	PIN_MutexLock(&malloc_lock);
+	malloc_root = DeleteAddress(malloc_root, ptr);
+	PIN_MutexUnlock(&malloc_lock);
+
+	thread->reallocsize = size;
 }
+
 VOID ReallocAfter(ADDRINT addr)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	PIN_MutexLock(&lock);
+	PIN_MutexLock(&thread_lock);
 	struct thread *thread = FindThread(threadid);
-	fprintf(trace, "%lx %x %lx %lx\n", threadid, _MALLOC, thread->mallocsize, addr);
-	malloc_root = InsertMAddress(malloc_root, addr, thread->mallocsize);
-	PIN_MutexUnlock(&lock);
-}
+	PIN_MutexUnlock(&thread_lock);
+//	fprintf(trace, "%lx %x %lx %lx\n", threadid, REALLOC, thread->reallocsize, addr);
+	fprintf(stderr, "%lx realloc after %lx %lx\n", PIN_ThreadUid(), addr, thread->reallocsize);
+	fprintf(stderr, "%lx realloc after %lx %lx\n", PIN_ThreadUid(), addr, thread->mallocsize);
 
+	PIN_MutexLock(&malloc_lock);
+	malloc_root = InsertMAddress(malloc_root, addr, thread->reallocsize);
+	PIN_MutexUnlock(&malloc_lock);
+
+	thread->reallocsize = 0;
+}
 
 /* ===================================================================== */
 /* Instrumentation routines                                              */
@@ -697,12 +750,30 @@ VOID Image(IMG img, VOID *v)
 		RTN_Close(mallocRtn);
 	}
 
+	//  Find the calloc() function.
+//	RTN callocRtn = RTN_FindByName(img, CALLOC);
+//	if (RTN_Valid(callocRtn))
+//	{
+//		RTN_Open(callocRtn);
+//
+//		// Instrument calloc() to print the input argument value and the return value.
+//		RTN_InsertCall(callocRtn, IPOINT_BEFORE, (AFUNPTR)CallocBefore,
+//				IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+//				IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+//				IARG_END);
+//		RTN_InsertCall(callocRtn, IPOINT_AFTER, (AFUNPTR)CallocAfter,
+//				IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
+//
+//		RTN_Close(callocRtn);
+//	}
+//
+//	// Find the realloc() function.
 //	RTN reallocRtn = RTN_FindByName(img, REALLOC);
 //	if (RTN_Valid(reallocRtn))
 //	{
 //		RTN_Open(reallocRtn);
 //
-//		// Instrument malloc() to print the input argument value and the return value.
+//		// Instrument realloc() to print the input argument value and the return value.
 //		RTN_InsertCall(reallocRtn, IPOINT_BEFORE, (AFUNPTR)ReallocBefore,
 //				IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
 //				IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
@@ -710,7 +781,7 @@ VOID Image(IMG img, VOID *v)
 //		RTN_InsertCall(reallocRtn, IPOINT_AFTER, (AFUNPTR)ReallocAfter,
 //				IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
 //
-//		RTN_Close(mallocRtn);
+//		RTN_Close(reallocRtn);
 //	}
 
 	// Find the free() function.
@@ -736,17 +807,15 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	treeNode *node;
 
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	PIN_MutexLock(&lock);
+	PIN_MutexLock(&thread_lock);
 	struct thread* thread = FindThread(threadid);
 	if(thread ==NULL)
 	{
 		root_thread = InsertThread(threadid, root_thread);
 		thread = FindThread(threadid);
 	}
-	PIN_MutexUnlock(&lock);
+	PIN_MutexUnlock(&thread_lock);
 	assert(thread);
-
-	double stamp;
 
 	switch(num)
 	{
@@ -757,22 +826,29 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 
 //		sprintf(thread->buffer, "%lx %lx %lx %lx %lx ", threadid, num, arg0, arg1, arg2);
 		thread->flag = 3;
+		PIN_MutexLock(&malloc_lock);
 		node = FindAddressInRange(malloc_root, arg1);
+		PIN_MutexUnlock(&malloc_lock);
 		if(node != NULL)
 		{
 			node->usedforread = TRUE;
-			sprintf(thread->buffer, "MALLOC READ %lx %x %lx %lx %lx ", threadid, MALLOC_READ, arg0, arg1, arg2);
+			//bb8
+			sprintf(thread->buffer, "%lx %x %lx %lx %lx ", threadid, MALLOC_READ, arg0, arg1, arg2);
 		}
 		else if(arg1 >= sp - PAGE_SIZE)
 		{
+			//bb9
 			thread->stack = InsertSAddress(thread->stack, arg1, arg2);
-			sprintf(thread->buffer, "STACK READ %lx %x %lx %lx %lx ", threadid, STACK_READ, arg0, arg1, arg2);
+			sprintf(thread->buffer, "%lx %x %lx %lx %lx ", threadid, STACK_READ, arg0, arg1, arg2);
 		}
 		else
 		{
 //			data_read = InsertRead(data_read, arg1, arg2);
+			//bba
+			PIN_MutexLock(&data_lock);
 			data_root = InsertDAddress(data_root, arg1, arg2);
-			sprintf(thread->buffer, "DATA READ %lx %x %lx %lx %lx ", threadid, DATA_READ, arg0, arg1, arg2);
+			PIN_MutexUnlock(&data_lock);
+			sprintf(thread->buffer, "%lx %x %lx %lx %lx ", threadid, DATA_READ, arg0, arg1, arg2);
 		}
 		return;
 	case SYS_WRITE:
@@ -870,16 +946,14 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		return;
 
 	case SYS_EXECVE:
-		stamp = get_timer();
-
-		sprintf(thread->buffer, "%lx %lx %s %lf ", threadid, num, (char*)arg0, stamp);
+		sprintf(thread->buffer, "%lx %lx %s ", threadid, num, (char*)arg0);
 		fprintf(trace, "%s\n", thread->buffer);
 		thread->buffer[0] = '\0';
 		fflush(trace);
 		thread->flag = 0;
-		PIN_MutexLock(&lock);
+		PIN_MutexLock(&thread_lock);
 		root_thread = DeleteThread(threadid, root_thread);
-		PIN_MutexUnlock(&lock);
+		PIN_MutexUnlock(&thread_lock);
 		break;
 
 	default :
@@ -893,17 +967,16 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 VOID SysAfter(ADDRINT ret, ADDRINT num)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	PIN_MutexLock(&lock);
+	PIN_MutexLock(&thread_lock);
 	struct thread *thread = FindThread(threadid);
-	PIN_MutexUnlock(&lock);
+	PIN_MutexUnlock(&thread_lock);
 	if(thread->flag != 0)
 	{
 		if(!(thread->flag == 3 && ((ret+1 == 0) || (ret == 0))))
 		{
 			char buf[MAX_BUFSIZE];
-			double stamp = get_timer();
 
-			sprintf(buf,"%lf %x\n", stamp, (unsigned int)ret);
+			sprintf(buf,"%x\n", (unsigned int)ret);
 			strcat(thread->buffer, buf);
 			fprintf(trace, "%s", thread->buffer);
 			fflush(trace);
@@ -948,15 +1021,17 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	if(FindAddressInRange(data_root, memaddr))
 	{
 		PIN_THREAD_UID threadid = PIN_ThreadUid();
-		fprintf(trace, "DATA WRITE %lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
+		fprintf(trace, "%lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
 	}
 	else
 	{
 		PIN_THREAD_UID threadid = PIN_ThreadUid();
+		PIN_MutexLock(&malloc_lock);
 		treeNode *node = FindAddressInRange(malloc_root, memaddr);
+		PIN_MutexUnlock(&malloc_lock);
 		if(node != NULL && node->usedforread == TRUE)
 		{
-			fprintf(trace, "MALLOC WRITE %lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
+			fprintf(trace, "%lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
 		}
 	}
 //	else
@@ -964,25 +1039,30 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 }
 VOID StackWrite(ADDRINT memaddr, ADDRINT writesize)
 {
-//	if(FindRead(memaddr, root_read) != NULL)
 	if(FindAddressInRange(FindThread(PIN_ThreadUid())->stack, memaddr))
 	{
 		PIN_THREAD_UID threadid = PIN_ThreadUid();
-		fprintf(trace, "STACK WRITE %lx %x %lx %lx\n", threadid, STACK, memaddr, writesize);
+		fprintf(trace, "%lx %x %lx %lx\n", threadid, STACK, memaddr, writesize);
 	}
 }
 
 VOID Return(ADDRINT sp)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
+	PIN_MutexLock(&thread_lock);
 	struct thread* thread = FindThread(threadid);
+	PIN_MutexUnlock(&thread_lock);
 	treeNode *node = FindMinAddress(thread->stack);
-	while(node != NULL && node->address <= sp)
+	if(node == NULL)
+		return;
+	while(node->address <= sp)
 	{
+		fprintf(trace, "%lx %x %lx\n", threadid, RETURN, node->address);
 		thread->stack = DeleteAddress(thread->stack, node->address);
 		node = FindMinAddress(thread->stack);
+		if(node == NULL)
+			return;
 	}
-//	fprintf(trace, "%lx %x %lx\n", threadid, RETURN, sp);
 }
 
 // Is called for every instruction and instruments syscalls
@@ -1012,36 +1092,62 @@ VOID Instruction(INS ins, VOID *v)
 					IARG_REG_VALUE, REG_STACK_PTR,
 					IARG_END);
 		}
-		else if(INS_IsMemoryWrite(ins) && !(INS_IsBranchOrCall(ins)))
-		if(INS_IsMemoryWrite(ins) && !(INS_IsBranchOrCall(ins)))
+		else if(INS_IsStackWrite(ins))
+//		if(INS_IsStackWrite(ins))
 		{
-			if(INS_IsStackWrite(ins))
-			{
-				INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(StackWrite),
-						IARG_MEMORYWRITE_EA,
-						IARG_MEMORYWRITE_SIZE,
-						IARG_END);
-			}
-			else
-			{
-				INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(MemoryWrite),
-						IARG_MEMORYWRITE_EA,
-						IARG_MEMORYWRITE_SIZE,
-						IARG_END);
-			}
+			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(StackWrite),
+					IARG_MEMORYWRITE_EA,
+					IARG_MEMORYWRITE_SIZE,
+					IARG_END);
+		}
+		else if(INS_IsMemoryWrite(ins) && !(INS_IsBranchOrCall(ins)))
+//		if(INS_IsMemoryWrite(ins) && !(INS_IsBranchOrCall(ins)))
+		{
+			INS_InsertCall(ins, IPOINT_BEFORE, AFUNPTR(MemoryWrite),
+					IARG_MEMORYWRITE_EA,
+					IARG_MEMORYWRITE_SIZE,
+					IARG_END);
 		}
 	}
 }
 
 VOID Fini(INT32 code, VOID *v)
 {
+	process_fini = 1;
+
 	fprintf(trace, "%lx %x\n", PIN_ThreadUid(), PROCESSEND);
 	fclose(trace);
 
+	int pid = getpid();
+
+	fprintf(stderr, "%x process fini1\n", pid);
+
+	fprintf(stderr, "%x process fini2\n", pid);
+
+	PIN_MutexLock(&malloc_lock);
 	while(malloc_root != NULL)
 		malloc_root = DeleteAddress(malloc_root, malloc_root->address);
+	PIN_MutexUnlock(&malloc_lock);
+
+	fprintf(stderr, "%x process fini3\n", pid);
+
+	PIN_MutexLock(&data_lock);
 	while(data_root != NULL)
 		data_root = DeleteAddress(data_root, data_root->address);
+	PIN_MutexUnlock(&data_lock);
+
+	fprintf(stderr, "%x process fini4\n", pid);
+
+	PIN_MutexLock(&thread_lock);
+	while(root_thread != NULL)
+		root_thread = DeleteThread(root_thread->tid, root_thread);
+	PIN_MutexUnlock(&thread_lock);
+
+	fprintf(stderr, "%x process fini5\n", pid);
+
+	PIN_MutexFini(&thread_lock);
+	PIN_MutexFini(&data_lock);
+	PIN_MutexFini(&malloc_lock);
 }
 
 /* ===================================================================== */
@@ -1058,23 +1164,26 @@ INT32 Usage()
 VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	PIN_MutexLock(&lock);
+	PIN_MutexLock(&thread_lock);
 	struct thread *temp = FindThread(threadid);
 	if(temp == NULL)
 		root_thread = InsertThread(threadid, root_thread);
-	PIN_MutexUnlock(&lock);
-	fprintf(trace, "%lx %x %x\n",  threadid, THREADSTART, PIN_GetTid());
+	PIN_MutexUnlock(&thread_lock);
+	fprintf(trace, "%lx %x %x %x\n",  threadid, THREADSTART, PIN_GetTid(), PIN_GetParentTid());
 	fflush(trace);
 }
 
 VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
+	fprintf(stderr, "thread fini1 %lx\n", threadid);
 	fprintf(trace, "%lx %x\n", threadid, THREADEND);
 	fflush(trace);
-	PIN_MutexLock(&lock);
+	PIN_MutexLock(&thread_lock);
+	fprintf(stderr, "thread fini2 %lx\n", threadid);
 	root_thread = DeleteThread(threadid, root_thread);
-	PIN_MutexUnlock(&lock);
+	PIN_MutexUnlock(&thread_lock);
+	fprintf(stderr, "thread fini3 %lx\n", threadid);
 }
 
 /* ===================================================================== */
@@ -1087,6 +1196,9 @@ int main(int argc, char *argv[])
 	PIN_InitSymbols();
 
 	if (PIN_Init(argc, argv)) return Usage();
+
+	pagesize = getpagesize();
+	fprintf(stderr, "pagesize %lx\n", pagesize);
 
     globalReserve = malloc(ReserveSize);
     PIN_AddOutOfMemoryFunction(Assert, 0);
@@ -1104,15 +1216,16 @@ int main(int argc, char *argv[])
 	char *buf = (char*)malloc(sizeof(char)*200);
 	assert(buf);
 	int temp = readlink("/proc/self/exe", buf, 200);
-	fprintf(trace, "%s\n", buf);
+//	fprintf(trace, "%s\n", buf);
 	free(buf);
 	temp = temp+1;
 
 //	fprintf(trace, "%x\n", pid);
 
-	PIN_MutexInit(&lock);
-	//
-	//	PIN_AddFollowChildProcessFunction(FollowChild, 0);
+	PIN_MutexInit(&thread_lock);
+	PIN_MutexInit(&data_lock);
+	PIN_MutexInit(&malloc_lock);
+
 	INS_AddInstrumentFunction(Instruction, 0);
 	PIN_AddSyscallEntryFunction(SyscallEntry, 0);
 	PIN_AddSyscallExitFunction(SyscallExit, 0);
@@ -1130,13 +1243,13 @@ int main(int argc, char *argv[])
 	//
 	PIN_AddFiniFunction(Fini, 0);
 	//
-	set_timer();
+
+	process_fini = 0;
 
 	// Never returns
 	PIN_StartProgram();
 
 	return 0;
 }
-
 
 
