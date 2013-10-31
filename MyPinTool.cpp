@@ -164,6 +164,8 @@ typedef struct treeNode
 	BOOL usedforread;
 	ADDRINT offset;
 
+	int fd;
+
 	struct treeNode *left;
 	struct treeNode *right;
 
@@ -180,9 +182,9 @@ typedef struct FD
 	struct FD *right;
 } FD;
 
-treeNode * InsertDAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT offset);
+treeNode * InsertDAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset);
 treeNode * InsertMAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT offset);
-treeNode * InsertSAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT offset);
+treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset);
 
 FD* FindFD(FD *_node, int fd)
 {
@@ -246,6 +248,7 @@ FD* InsertFD(FD *node, int fd, char* path)
 		{
 //			assert(0);
 			node->fd = fd;
+			assert(node->path);
 			free(node->path);
 			node->path = path;
 		}
@@ -309,7 +312,7 @@ typedef struct FD_TABLE
 	FD *root;
 }FD_TABLE;
 
-FD* CopyFD_TABLE(FD* child, FD* parent)
+FD* CopyFD_TABLE(FD* parent)
 {
 	if(parent == NULL)
 		return NULL;
@@ -317,9 +320,10 @@ FD* CopyFD_TABLE(FD* child, FD* parent)
 	FD* newnode = (FD*)malloc(sizeof(FD));
 	newnode->fd = parent->fd;
 	newnode->path = strdup(parent->path);
+	newnode->buffer = NULL;
 
-	newnode->left = CopyFD_TABLE(newnode->left, parent->left);
-	newnode->right = CopyFD_TABLE(newnode->right, parent->right);
+	newnode->left = CopyFD_TABLE(parent->left);
+	newnode->right = CopyFD_TABLE(parent->right);
 
 	return newnode;
 }
@@ -365,7 +369,7 @@ treeNode* FindMaxAddress(treeNode *node)
 		return node;
 }
 
-treeNode * InsertDAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT offset)
+treeNode * InsertDAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset)
 {
 	if(node==NULL)
 	{
@@ -377,16 +381,17 @@ treeNode * InsertDAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT
 		temp -> usedforread = TRUE;
 		temp -> left = temp -> right = NULL;
 		temp->offset = offset;
+		temp->fd = fd;
 		return temp;
 	}
 
 	if(address >(node->address))
 	{
-		node->right = InsertDAddress(node->right,address,size, offset);
+		node->right = InsertDAddress(node->right,address,fd,size, offset);
 	}
 	else if(address < (node->address))
 	{
-		node->left = InsertDAddress(node->left,address,size, offset);
+		node->left = InsertDAddress(node->left,address,fd,size, offset);
 	}
 	else
 	{
@@ -398,7 +403,7 @@ treeNode * InsertDAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT
 	return node;
 }
 
-treeNode * InsertSAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT offset)
+treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset)
 {
 	if(node==NULL)
 	{
@@ -410,19 +415,21 @@ treeNode * InsertSAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT
 		temp -> usedforread = TRUE;
 		temp->offset = offset;
 		temp -> left = temp -> right = NULL;
+		temp->fd = fd;
 		return temp;
 	}
 
 	if(address >(node->address))
 	{
-		node->right = InsertSAddress(node->right,address,size, offset);
+		node->right = InsertSAddress(node->right,address,fd,size, offset);
 	}
 	else if(address < (node->address))
 	{
-		node->left = InsertSAddress(node->left,address,size, offset);
+		node->left = InsertSAddress(node->left,address,fd,size, offset);
 	}
 	else
 	{
+		node->fd = fd;
 		node->size = size;
 		node->offset = offset;
 		node->usedforread = TRUE;
@@ -444,7 +451,7 @@ treeNode * InsertMAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT
 		temp -> size = size;
 		temp -> usedforread = FALSE;
 		temp -> left = temp -> right = NULL;
-	    fprintf(trace, "%lx malloc %lx %lx\n", PIN_ThreadUid(), size, address);
+//	    fprintf(trace, "%lx malloc %lx %lx\n", PIN_ThreadUid(), size, address);
 		return temp;
 	}
 
@@ -533,7 +540,7 @@ treeNode * DeleteMAddress(treeNode *node, ADDRINT address)
 	}
 	else
 	{
-    	fprintf(trace, "%lx free %lx\n", PIN_ThreadUid(), address);
+//    	fprintf(trace, "%lx free %lx\n", PIN_ThreadUid(), address);
 		/* Now We can delete this node and replace with either minimum element
                    in the right sub tree or maximum element in the left subtree */
 		if(node->right && node->left)
@@ -633,15 +640,6 @@ INT32 Usage()
 
 ///////////////////////////////////////////////////////////////////
 
-struct cloneflag
-{
-	OS_THREAD_ID tid;
-	BOOL vm;
-	BOOL files;
-
-	struct cloneflag *left, *right;
-};
-
 struct thread
 {
 	PIN_THREAD_UID tid;
@@ -651,116 +649,11 @@ struct thread
 	treeNode *stack;
 	FD_TABLE *fdtable;
 
-	ADDRINT cloneflag;
-	struct cloneflag *childflag;
 	char* newfdpath;
 
 	struct thread *left, *right;
 };
 struct thread *root_thread;
-
-struct cloneflag* FindClone(struct cloneflag *_node, OS_THREAD_ID threadid)
-{
-	struct cloneflag *node = _node;
-	while(node != NULL)
-	{
-		if(node->tid == threadid)
-			return node;
-		else if(node->tid > threadid)
-			node = node->left;
-		else
-			node = node->right;
-	}
-	return NULL;
-}
-
-struct cloneflag* FindMinClone(struct cloneflag *node)
-{
-	if(node==NULL)
-	{
-		/* There is no element in the tree */
-		return NULL;
-	}
-	if(node->left) /* Go to the left sub tree to find the min element */
-		return FindMinClone(node->left);
-	else
-		return node;
-}
-
-struct cloneflag* FindMaxClone(struct cloneflag *node)
-{
-	if(node==NULL)
-	{
-		/* There is no element in the tree */
-		return NULL;
-	}
-	if(node->right) /* Go to the left sub tree to find the min element */
-		return FindMaxClone(node->right);
-	else
-		return node;
-}
-
-struct cloneflag* InsertClone(struct cloneflag *node, struct cloneflag *newnode)
-{
-	if(node == NULL)
-	{
-		return newnode;
-	}
-	else
-	{
-		if(node->tid < newnode->tid)
-			node->right = InsertClone(node->right, newnode);
-		else if(node->tid < newnode->tid)
-			node->left = InsertClone(node->left, newnode);
-		else
-		{
-//			fprintf(stderr, "err %lx\n", threadid);
-			assert(0);
-		}
-	}
-	return node;
-}
-
-struct cloneflag* DeleteClone(struct cloneflag* node, OS_THREAD_ID tid)
-{
-	struct cloneflag *temp;
-	assert(node);
-	if(tid < node->tid)
-	{
-		node->left = DeleteClone(node->left, tid);
-	}
-	else if(tid > node->tid)
-	{
-		node->right = DeleteClone(node->right, tid);
-	}
-	else
-	{
-		/* Now We can delete this node and replace with either minimum element
-                   in the right sub tree or maximum element in the left subtree */
-		if(node->right && node->left)
-		{
-			/* Here we will replace with minimum element in the right sub tree */
-			temp = FindMinClone(node->right);
-			node -> tid = temp->tid;
-			node->files = temp->files;
-
-			/* As we replaced it with some other node, we have to delete that node */
-			node -> right = DeleteClone(node->right, temp->tid);
-		}
-		else
-		{
-			/* If there is only one or zero children then we can directly
-                           remove it from the tree and connect its parent to its child */
-			temp = node;
-			if(node->left == NULL)
-				node = node->right;
-			else if(node->right == NULL)
-				node = node->left;
-			free(temp); /* temp is longer required */
-		}
-	}
-	return node;
-}
 
 struct thread* FindThreadByOSTid(struct thread *node, OS_THREAD_ID threadid)
 {
@@ -838,7 +731,6 @@ struct thread* InsertThread(PIN_THREAD_UID threadid, struct thread *node)
 		assert(node->buffer);
 		node->stack = NULL;
 		node->fdtable = NULL;
-		node->childflag = NULL;
 	}
 	else
 	{
@@ -911,7 +803,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 
 	treeNode *node;
 
-//	ADDRINT addr;
+	ADDRINT addr;
 
 	off_t offset;
 	FD *fd;
@@ -941,10 +833,9 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		assert(fd);
 
 		offset = lseek((int)arg0, 0, SEEK_CUR);
+//
+		fd->buffer = InsertDAddress(fd->buffer, arg1, fd->fd, 0, 0);
 
-		fd->buffer = InsertDAddress(fd->buffer, arg0, 0, 0);
-
-//		fprintf(stderr, "%x read %lx %lx\n", PIN_GetTid(), arg0, offset);
 		PIN_MutexLock(&malloc_lock);
 		node = FindAddressInRange(malloc_root, arg1);
 		PIN_MutexUnlock(&malloc_lock);
@@ -952,20 +843,21 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		{
 			node->usedforread = TRUE;
 			node->offset = offset;
+			node->fd = (int)arg0;
 			//bb8
 			sprintf(thread->buffer, "%lx %x %lx %lx %lx %lx ", threadid, MALLOC_READ, arg0, arg1, arg2, offset);
 		}
 		else if(arg1 >= sp - pagesize)
 		{
 			//bb9
-			thread->stack = InsertSAddress(thread->stack, arg1, arg2, offset);
+			thread->stack = InsertSAddress(thread->stack, arg1, (int)arg0, arg2, offset);
 			sprintf(thread->buffer, "%lx %x %lx %lx %lx %lx ", threadid, STACK_READ, arg0, arg1, arg2, offset);
 		}
 		else
 		{
 			//bba
 			PIN_MutexLock(&data_lock);
-			data_root = InsertDAddress(data_root, arg1, arg2, offset);
+			data_root = InsertDAddress(data_root, arg1, (int)arg0, arg2, offset);
 			PIN_MutexUnlock(&data_lock);
 			sprintf(thread->buffer, "%lx %x %lx %lx %lx %lx ", threadid, DATA_READ, arg0, arg1, arg2, offset);
 		}
@@ -1073,38 +965,38 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 
 		assert(fd);
 
-//		while(fd->buffer)
-//		{
-//			addr = fd->buffer->address;
-//
-//			//malloc
-//			PIN_MutexLock(&malloc_lock);
-//			node = FindAddressInRange(malloc_root, addr);
-//			PIN_MutexUnlock(&malloc_lock);
-//			if(node != NULL)
-//				node->usedforread = FALSE;
-//			//stack
-//			else
-//			{
-//				node = FindAddressInRange(thread->stack, addr);
-//				if(node)
-//				{
-//					thread->stack = DeleteAddress(thread->stack, node->address);
-//				}
-//				else
-//				{
-//					//data
-//					PIN_MutexLock(&data_lock);
-//					node = FindAddressInRange(data_root, addr);
-//					if(node)
-//					{
-//						data_root = DeleteAddress(data_root, node->address);
-//					}
-//					PIN_MutexUnlock(&data_lock);
-//				}
-//			}
-//			fd->buffer = DeleteAddress(fd->buffer, addr);
-//		}
+		while(fd->buffer)
+		{
+			addr = fd->buffer->address;
+
+			//malloc
+			PIN_MutexLock(&malloc_lock);
+			node = FindAddressInRange(malloc_root, addr);
+			PIN_MutexUnlock(&malloc_lock);
+			if(node != NULL)
+				node->usedforread = FALSE;
+			//stack
+			else
+			{
+				node = FindAddressInRange(thread->stack, addr);
+				if(node)
+				{
+					thread->stack = DeleteAddress(thread->stack, node->address);
+				}
+				else
+				{
+					//data
+					PIN_MutexLock(&data_lock);
+					node = FindAddressInRange(data_root, addr);
+					if(node)
+					{
+						data_root = DeleteAddress(data_root, node->address);
+					}
+					PIN_MutexUnlock(&data_lock);
+				}
+			}
+			fd->buffer = DeleteAddress(fd->buffer, addr);
+		}
 
 		sprintf(thread->buffer, "%lx %lx %lx ", threadid, num, arg0);
 		PIN_MutexLock(&thread->fdtable->lock);
@@ -1114,20 +1006,19 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		thread->flag = SYS_CLOSE;
 		break;
 
-	case SYS_EXIT:
-	case SYS_EXIT_GROUP:
-	case SYS_FORK:
-	case SYS_VFORK:
-		sprintf(thread->buffer, "%lx %lx %lx ", threadid, num, arg0);
-		fprintf(trace, "%s\n", thread->buffer);
-		fflush(trace);
-		thread->buffer[0] = '\0';
-		thread->flag = SYS_NONE;
-		return;
+//	case SYS_EXIT:
+//	case SYS_EXIT_GROUP:
+//	case SYS_FORK:
+//	case SYS_VFORK:
+//		sprintf(thread->buffer, "%lx %lx %lx ", threadid, num, arg0);
+//		fprintf(trace, "%s\n", thread->buffer);
+//		fflush(trace);
+//		thread->buffer[0] = '\0';
+//		thread->flag = SYS_NONE;
+//		return;
 
 	case SYS_CLONE:
 		sprintf(thread->buffer, "%lx %lx %lx %lx %lx ", threadid, num, arg0, arg1, arg2);
-		thread->cloneflag = arg0;
 		if(arg0 & CLONE_FILES)
 		{
 			thread->buffer = strcat(thread->buffer, "files ");
@@ -1148,7 +1039,8 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		{
 			thread->buffer = strcat(thread->buffer, "io ");
 		}
-		thread->flag = SYS_CLONE;
+//		thread->flag = SYS_CLONE;
+		thread->flag = SYS_NONE;
 //		thread->flag = 1;
 		return;
 
@@ -1196,19 +1088,7 @@ VOID SysAfter(ADDRINT ret, ADDRINT num)
 			fflush(trace);
 			thread->buffer[0] = '\0';
 		}
-		if(thread->flag == SYS_CLONE)
-		{
-			if(thread->cloneflag & CLONE_FILES)
-			{
-				struct cloneflag *childflag = (struct cloneflag*)malloc(sizeof(struct cloneflag));
-				childflag->files = TRUE;
-				childflag->tid = ret;
-				childflag->left = NULL;
-				childflag->right = NULL;
-//				thread->childflag = InsertClone(thread->childflag, childflag);
-			}
-		}
-		else if(thread->flag == SYS_OPEN || thread->flag == SYS_DUP)
+		if(thread->flag == SYS_OPEN || thread->flag == SYS_DUP)
 		{
 			if(ret+1 != 0)
 			{
@@ -1243,34 +1123,74 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 {
 	treeNode *node;
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
+	FD *fd;
+	PIN_MutexLock(&thread_lock);
+	struct thread* thread = FindThread(threadid);
+	PIN_MutexUnlock(&thread_lock);
+
+	ADDRINT startoffset, endoffset;
 
 	PIN_MutexLock(&data_lock);
 	node = FindAddressInRange(data_root, memaddr);
 	PIN_MutexUnlock(&data_lock);
-	if(node)
+	if(node && node->usedforread == TRUE)
 	{
-		PIN_THREAD_UID threadid = PIN_ThreadUid();
 		fprintf(trace, "%lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
+		PIN_MutexLock(&thread->fdtable->lock);
+		fd = FindFD(thread->fdtable->root, node->fd);
+		PIN_MutexUnlock(&thread->fdtable->lock);
+		assert(fd);
+
+		startoffset = memaddr - node->address + node->offset;
+		endoffset = memaddr - node->address + node->offset + writesize;
+
+		fprintf(trace, "%s %lx %lx\n", fd->path, startoffset, endoffset);
 		return;
 	}
 	PIN_MutexLock(&malloc_lock);
 	node = FindAddressInRange(malloc_root, memaddr);
 	PIN_MutexUnlock(&malloc_lock);
-	if(node)
+	if(node && node->usedforread == TRUE)
 	{
-		if(node->usedforread == TRUE)
-		{
-			fprintf(trace, "%lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
-		}
+		fprintf(trace, "%lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
+		PIN_MutexLock(&thread->fdtable->lock);
+		fd = FindFD(thread->fdtable->root, node->fd);
+		PIN_MutexUnlock(&thread->fdtable->lock);
+
+		assert(fd);
+
+		startoffset = memaddr - node->address + node->offset;
+		endoffset = memaddr - node->address + node->offset + writesize;
+
+		fprintf(trace, "%s %lx %lx\n", fd->path, startoffset, endoffset);
 	}
 }
 
 VOID StackWrite(ADDRINT memaddr, ADDRINT writesize)
 {
-	if(FindAddressInRange(FindThread(PIN_ThreadUid())->stack, memaddr))
+	treeNode *node;
+	PIN_THREAD_UID threadid = PIN_ThreadUid();
+	FD *fd;
+	ADDRINT startoffset, endoffset;
+
+	PIN_MutexLock(&thread_lock);
+	struct thread* thread = FindThread(threadid);
+	PIN_MutexUnlock(&thread_lock);
+
+	node = FindAddressInRange(thread->stack, memaddr);
+	if(node && node->usedforread == TRUE)
 	{
-		PIN_THREAD_UID threadid = PIN_ThreadUid();
 		fprintf(trace, "%lx %x %lx %lx\n", threadid, STACK, memaddr, writesize);
+		PIN_MutexLock(&thread->fdtable->lock);
+		fd = FindFD(thread->fdtable->root, node->fd);
+		PIN_MutexUnlock(&thread->fdtable->lock);
+
+		assert(fd);
+
+		startoffset = memaddr - node->address + node->offset;
+		endoffset = memaddr - node->address + node->offset + writesize;
+
+		fprintf(trace, "%s %lx %lx\n", fd->path, startoffset, endoffset);
 	}
 }
 
@@ -1417,7 +1337,7 @@ VOID Fini(INT32 code, VOID *v)
 	PIN_MutexFini(&data_lock);
 	PIN_MutexFini(&malloc_lock);
 
-	fprintf(trace, "%lx %x\n", PIN_ThreadUid(), PROCESSEND);
+//	fprintf(trace, "%lx %x\n", PIN_ThreadUid(), PROCESSEND);
 	fclose(trace);
 }
 
@@ -1430,12 +1350,12 @@ VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 		root_thread = InsertThread(threadid, root_thread);
 	temp = FindThread(threadid);
 	PIN_MutexUnlock(&thread_lock);
-	fprintf(trace, "%lx %x %x %x\n",  threadid, THREADSTART, PIN_GetTid(), PIN_GetParentTid());
+//	fprintf(trace, "%lx %x %x %x\n",  threadid, THREADSTART, PIN_GetTid(), PIN_GetParentTid());
+	temp->fdtable = (FD_TABLE*)malloc(sizeof(FD_TABLE));
 
 	if(PIN_GetParentTid() == 0)
 	{
 		//no parent
-		temp->fdtable = (FD_TABLE*)malloc(sizeof(FD_TABLE));
 		PIN_MutexInit(&temp->fdtable->lock);
 		temp->fdtable->count = 0;
 		temp->fdtable->root = NULL;
@@ -1446,26 +1366,14 @@ VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 		PIN_MutexLock(&thread_lock);
 		struct thread *parent = FindThreadByOSTid(root_thread, PIN_GetParentTid());
 		PIN_MutexUnlock(&thread_lock);
-//		struct cloneflag *flag = FindClone(parent->childflag, PIN_GetTid());
-//		if(flag != NULL)
-//		{
-//			//clone files
-//			PIN_MutexLock(&parent->fdtable->lock);
-//			temp->fdtable = parent->fdtable;
-//			temp->fdtable->sharecount++;
-//			PIN_MutexUnlock(&parent->fdtable->lock);
-//		}
-//		else
-		{
-			temp->fdtable = (FD_TABLE*)malloc(sizeof(FD_TABLE));
-			PIN_MutexInit(&temp->fdtable->lock);
-			temp->fdtable->count = 0;
-			temp->fdtable->root = NULL;
-			temp->fdtable->sharecount = 1;
-			PIN_MutexLock(&parent->fdtable->lock);
-			temp->fdtable->root = CopyFD_TABLE(temp->fdtable->root, parent->fdtable->root);
-			PIN_MutexUnlock(&parent->fdtable->lock);
-		}
+
+		PIN_MutexInit(&temp->fdtable->lock);
+		temp->fdtable->count = 0;
+		temp->fdtable->root = NULL;
+		temp->fdtable->sharecount = 1;
+		PIN_MutexLock(&parent->fdtable->lock);
+		temp->fdtable->root = CopyFD_TABLE(parent->fdtable->root);
+		PIN_MutexUnlock(&parent->fdtable->lock);
 	}
 	fflush(trace);
 }
@@ -1473,7 +1381,7 @@ VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	fprintf(trace, "%lx %x\n", threadid, THREADEND);
+//	fprintf(trace, "%lx %x\n", threadid, THREADEND);
 	fflush(trace);
 	PIN_MutexLock(&thread_lock);
 	struct thread* node = FindThread(threadid);
@@ -1487,6 +1395,8 @@ VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 	}
 	PIN_MutexUnlock(&node->fdtable->lock);
 
+	PIN_MutexFini(&node->fdtable->lock);
+	free(node->fdtable);
 
 	PIN_MutexLock(&thread_lock);
 	root_thread = DeleteThread(threadid, root_thread);
@@ -1589,7 +1499,6 @@ VOID Free( CONTEXT * context, AFUNPTR orgFuncptr, void * ptr)
 			PIN_MutexLock(&malloc_lock);
 			malloc_root = DeleteMAddress(malloc_root, (ADDRINT)ptr);
 			PIN_MutexUnlock(&malloc_lock);
-	//    	fprintf(trace, "%x free %p\n", PIN_GetTid(), ptr);
     	}
     }
 
