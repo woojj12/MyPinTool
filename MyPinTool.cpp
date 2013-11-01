@@ -126,15 +126,18 @@ END_LEGAL */
 
 #define _MALLOC	2000	//7d0
 #define _FREE	2001
-#define MEMORY	2002
-#define STACK	2003
-#define RETURN	2004	//7d4
+//#define MEMORY	2002
+#define MALLOC	2002
+#define DATA	2003
+#define STACK	2004
+#define RETURN	2005	//7d4
 
 #define MALLOC_READ	3000	//bb8
 #define STACK_READ	3001
 #define DATA_READ	3002
 
 #define SYS_NONE	9999
+#define SYS_FDETC	9998
 
 using namespace std;
 
@@ -259,7 +262,13 @@ FD* InsertFD(FD *node, int fd, char* path)
 FD* DeleteFD(FD* node, int fd)
 {
 	FD *temp;
-	assert(node);
+//	if(node == NULL)
+//	{
+//		fprintf(trace, "delete %d\n", fd);
+//	}
+//	assert(node);
+	if(node == NULL)
+		return NULL;
 	if(fd < node->fd)
 	{
 		node->left = DeleteFD(node->left, fd);
@@ -830,11 +839,12 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		fd = FindFD(thread->fdtable->root, arg0);
 		PIN_MutexUnlock(&thread->fdtable->lock);
 
-		assert(fd);
+//		assert(fd);
 
 		offset = lseek((int)arg0, 0, SEEK_CUR);
 //
-		fd->buffer = InsertDAddress(fd->buffer, arg1, fd->fd, 0, 0);
+		if(fd != NULL)
+			fd->buffer = InsertDAddress(fd->buffer, arg1, fd->fd, 0, 0);
 
 		PIN_MutexLock(&malloc_lock);
 		node = FindAddressInRange(malloc_root, arg1);
@@ -909,14 +919,21 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	case SYS_FCNTL:
 		if(arg1 == F_DUPFD || arg1 == F_DUPFD_CLOEXEC)
 		{
-			sprintf(thread->buffer, "%lx %lx %lx ", threadid, num, arg0);
 			PIN_MutexLock(&thread->fdtable->lock);
 			fd = FindFD(thread->fdtable->root, arg0);
 			PIN_MutexUnlock(&thread->fdtable->lock);
 
-			assert(fd);
+			if(fd!=NULL)
+			{
+				sprintf(thread->buffer, "%lx %lx %lx %s ", threadid, num, arg0, fd->path);
+				thread->newfdpath = strdup(fd->path);
+			}
+			else
+			{
+				sprintf(thread->buffer, "%lx %lx %lx %s ", threadid, num, arg0, "dup");
+				thread->newfdpath = strdup("dup");
+			}
 
-			thread->newfdpath = strdup(fd->path);
 			thread->flag = SYS_DUP;
 			break;
 		}
@@ -926,22 +943,24 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 			return;
 		}
 
-		//	case SYS_ACCEPT:
-		//	case SYS_ACCEPT4:
-		//	case SYS_EPOLL_CREATE:
-		//	case SYS_SOCKET:
-		//	case SYS_DUP:
-		//	case SYS_DUP2:
-		//	case SYS_DUP3:
-		//	case SYS_PIPE:
-		//	case SYS_PIPE2:
-		//	case SYS_SIGNALFD:
-		//	case SYS_TIMERFD_CREATE:
-		//	case SYS_EVENTFD:
-		//	case SYS_SIGNALFD4:
-		//	case SYS_EVENTFD2:
-		//		sprintf(thread->buffer, "%x %lx %lx ", threadid, num, arg0);
-		//		break;
+	case SYS_ACCEPT:
+	case SYS_ACCEPT4:
+	case SYS_EPOLL_CREATE:
+	case SYS_SOCKET:
+	case SYS_DUP:
+	case SYS_DUP2:
+	case SYS_DUP3:
+	case SYS_PIPE:
+	case SYS_PIPE2:
+	case SYS_SIGNALFD:
+	case SYS_TIMERFD_CREATE:
+	case SYS_EVENTFD:
+	case SYS_SIGNALFD4:
+	case SYS_EVENTFD2:
+		sprintf(thread->buffer, "%lx %lx %lx %s ", threadid, num, arg0, "etc");
+		thread->newfdpath = strdup("etc");
+		thread->flag = SYS_OPEN;
+		break;
 
 	case SYS_OPENAT:
 		sprintf(thread->buffer, "%lx %lx %s ", threadid, num, (char*)arg1);
@@ -963,39 +982,42 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		fd = FindFD(thread->fdtable->root, arg0);
 		PIN_MutexUnlock(&thread->fdtable->lock);
 
-		assert(fd);
+//		assert(fd);
 
-		while(fd->buffer)
+		if(fd)
 		{
-			addr = fd->buffer->address;
-
-			//malloc
-			PIN_MutexLock(&malloc_lock);
-			node = FindAddressInRange(malloc_root, addr);
-			PIN_MutexUnlock(&malloc_lock);
-			if(node != NULL)
-				node->usedforread = FALSE;
-			//stack
-			else
+			while(fd->buffer)
 			{
-				node = FindAddressInRange(thread->stack, addr);
-				if(node)
-				{
-					thread->stack = DeleteAddress(thread->stack, node->address);
-				}
+				addr = fd->buffer->address;
+
+				//malloc
+				PIN_MutexLock(&malloc_lock);
+				node = FindAddressInRange(malloc_root, addr);
+				PIN_MutexUnlock(&malloc_lock);
+				if(node != NULL)
+					node->usedforread = FALSE;
+				//stack
 				else
 				{
-					//data
-					PIN_MutexLock(&data_lock);
-					node = FindAddressInRange(data_root, addr);
+					node = FindAddressInRange(thread->stack, addr);
 					if(node)
 					{
-						data_root = DeleteAddress(data_root, node->address);
+						thread->stack = DeleteAddress(thread->stack, node->address);
 					}
-					PIN_MutexUnlock(&data_lock);
+					else
+					{
+						//data
+						PIN_MutexLock(&data_lock);
+						node = FindAddressInRange(data_root, addr);
+						if(node)
+						{
+							data_root = DeleteAddress(data_root, node->address);
+						}
+						PIN_MutexUnlock(&data_lock);
+					}
 				}
+				fd->buffer = DeleteAddress(fd->buffer, addr);
 			}
-			fd->buffer = DeleteAddress(fd->buffer, addr);
 		}
 
 		sprintf(thread->buffer, "%lx %lx %lx ", threadid, num, arg0);
@@ -1057,6 +1079,8 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		break;
 
 	default :
+//		sprintf(thread->buffer, "%ld ", num);
+//		fprintf(trace, "%ld\n", num);
 		thread->flag = SYS_NONE;
 		return;
 	}
@@ -1064,12 +1088,14 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 }
 
 // Print the return value of the system call
-VOID SysAfter(ADDRINT ret, ADDRINT num)
+VOID SysAfter(ADDRINT ret)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
 	PIN_MutexLock(&thread_lock);
 	struct thread *thread = FindThread(threadid);
 	PIN_MutexUnlock(&thread_lock);
+	char buf[MAX_BUFSIZE];
+	fprintf(stderr, "%ld\n", ret);
 	if(ret+1 == 0)
 	{
 		thread->flag = SYS_NONE;
@@ -1080,7 +1106,6 @@ VOID SysAfter(ADDRINT ret, ADDRINT num)
 	{
 //		if(!(thread->flag == 3 && ((ret+1 == 0) || (ret == 0))))
 		{
-			char buf[MAX_BUFSIZE];
 
 			sprintf(buf,"%x\n", (unsigned int)ret);
 			strcat(thread->buffer, buf);
@@ -1099,6 +1124,14 @@ VOID SysAfter(ADDRINT ret, ADDRINT num)
 		}
 		thread->flag = SYS_NONE;
 	}
+	else
+	{
+//		fprintf(trace, "\t%ld\n", ret);
+//		sprintf(buf, "%lx", ret);
+//		strcat(thread->buffer, buf);
+//		fprintf(trace, "%s\n", thread->buffer);
+//		thread->buffer = '\0';
+	}
 }
 
 VOID SyscallEntry(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *v)
@@ -1116,7 +1149,7 @@ VOID SyscallEntry(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 
 VOID SyscallExit(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *v)
 {
-	SysAfter(PIN_GetSyscallReturn(ctxt, std), PIN_GetSyscallNumber(ctxt, std));
+	SysAfter(PIN_GetSyscallReturn(ctxt, std));
 }
 
 VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
@@ -1135,16 +1168,20 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	PIN_MutexUnlock(&data_lock);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
+		fprintf(trace, "%lx %x %lx %lx\n", threadid, DATA, memaddr, writesize);
 		PIN_MutexLock(&thread->fdtable->lock);
 		fd = FindFD(thread->fdtable->root, node->fd);
 		PIN_MutexUnlock(&thread->fdtable->lock);
-		assert(fd);
 
-		startoffset = memaddr - node->address + node->offset;
-		endoffset = memaddr - node->address + node->offset + writesize;
+		if(fd)
+		{
+			startoffset = memaddr - node->address + node->offset;
+			endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%s %lx %lx\n", fd->path, startoffset, endoffset);
+			fprintf(trace, "%s %lx %lx\n", fd->path, startoffset, endoffset);
+		}
+		else
+			fprintf(trace, "%s %lx %lx\n", "???", startoffset, endoffset);
 		return;
 	}
 	PIN_MutexLock(&malloc_lock);
@@ -1152,17 +1189,22 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	PIN_MutexUnlock(&malloc_lock);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%lx %x %lx %lx\n", threadid, MEMORY, memaddr, writesize);
+		fprintf(trace, "%lx %x %lx %lx\n", threadid, MALLOC, memaddr, writesize);
 		PIN_MutexLock(&thread->fdtable->lock);
 		fd = FindFD(thread->fdtable->root, node->fd);
 		PIN_MutexUnlock(&thread->fdtable->lock);
 
-		assert(fd);
+//		assert(fd);
 
-		startoffset = memaddr - node->address + node->offset;
-		endoffset = memaddr - node->address + node->offset + writesize;
+		if(fd)
+		{
+			startoffset = memaddr - node->address + node->offset;
+			endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%s %lx %lx\n", fd->path, startoffset, endoffset);
+			fprintf(trace, "%s %lx %lx\n", fd->path, startoffset, endoffset);
+		}
+		else
+			fprintf(trace, "%s %lx %lx\n", "???", startoffset, endoffset);
 	}
 }
 
