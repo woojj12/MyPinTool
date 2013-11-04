@@ -169,188 +169,16 @@ typedef struct treeNode
 	ADDRINT offset;
 
 	int fd;
+	char *path;
 
 	struct treeNode *left;
 	struct treeNode *right;
 
 }treeNode;
 
-typedef struct FD
-{
-	int fd;
-	char* path;
-
-//	treeNode *buffer;
-
-	struct FD *left;
-	struct FD *right;
-} FD;
-
-treeNode * InsertDAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset);
+treeNode * InsertDAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset, char* buf);
 treeNode * InsertMAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT offset);
-treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset);
-
-FD* FindFD(FD *_node, int fd)
-{
-	FD *node = _node;
-	while(node != NULL)
-	{
-		if(node->fd == fd)
-			return node;
-		else if(node->fd > fd)
-			node = node->left;
-		else
-			node = node->right;
-	}
-	return NULL;
-}
-
-FD* FindMinFD(FD *node)
-{
-	if(node==NULL)
-	{
-		/* There is no element in the tree */
-		return NULL;
-	}
-	if(node->left) /* Go to the left sub tree to find the min element */
-		return FindMinFD(node->left);
-	else
-		return node;
-}
-
-FD* FindMaxFD(FD *node)
-{
-	if(node==NULL)
-	{
-		/* There is no element in the tree */
-		return NULL;
-	}
-	if(node->right) /* Go to the left sub tree to find the min element */
-		return FindMaxFD(node->right);
-	else
-		return node;
-}
-
-FD* InsertFD(FD *node, int fd, char* path)
-{
-	if(node == NULL)
-	{
-		node = (FD*)malloc(sizeof(FD));
-		node->fd = fd;
-		node->path = path;
-		node->left = NULL;
-		node->right = NULL;
-//		node->buffer = NULL;
-	}
-	else
-	{
-		if(node->fd < fd)
-			node->right = InsertFD(node->right, fd, path);
-		else if(node->fd > fd)
-			node->left = InsertFD(node->left, fd, path);
-		else
-		{
-//			assert(0);
-			node->fd = fd;
-			assert(node->path);
-			free(node->path);
-			node->path = path;
-		}
-	}
-	return node;
-}
-
-FD* DeleteFD(FD* node, int fd)
-{
-	FD *temp;
-//	if(node == NULL)
-//	{
-//		fprintf(trace, "delete %d\n", fd);
-//	}
-//	assert(node);
-	if(node == NULL)
-		return NULL;
-	if(fd < node->fd)
-	{
-		node->left = DeleteFD(node->left, fd);
-	}
-	else if(fd > node->fd)
-	{
-		node->right = DeleteFD(node->right, fd);
-	}
-	else
-	{
-		/* Now We can delete this node and replace with either minimum element
-                   in the right sub tree or maximum element in the left subtree */
-		if(node->right && node->left)
-		{
-			/* Here we will replace with minimum element in the right sub tree */
-			temp = FindMinFD(node->right);
-			node -> fd = temp->fd;
-			free(node->path);
-			node->path = temp->path;
-			temp->path = NULL;
-
-			/* As we replaced it with some other node, we have to delete that node */
-			node -> right = DeleteFD(node->right, temp->fd);
-		}
-		else
-		{
-			/* If there is only one or zero children then we can directly
-                           remove it from the tree and connect its parent to its child */
-			temp = node;
-			if(node->left == NULL)
-				node = node->right;
-			else if(node->right == NULL)
-				node = node->left;
-			else
-				assert(0);
-
-			if(temp->path != NULL)
-				free(temp->path);
-			free(temp); /* temp is longer required */
-		}
-	}
-	return node;
-}
-
-typedef struct FD_TABLE
-{
-	int sharecount;
-	int count;
-	PIN_MUTEX lock;
-	FD *root;
-}FD_TABLE;
-
-FD* CopyFD_TABLE(FD* parent)
-{
-	if(parent == NULL)
-		return NULL;
-
-	FD* newnode = (FD*)malloc(sizeof(FD));
-	newnode->fd = parent->fd;
-	newnode->path = strdup(parent->path);
-//	newnode->buffer = NULL;
-
-	newnode->left = CopyFD_TABLE(parent->left);
-	newnode->right = CopyFD_TABLE(parent->right);
-
-	return newnode;
-}
-
-void FreeFD_TABLE(FD* node)
-{
-	if(node == NULL)
-		return;
-
-	if(node->path != NULL)
-	{
-		free(node->path);
-		node->path = NULL;
-	}
-	FreeFD_TABLE(node->left);
-	FreeFD_TABLE(node->right);
-}
+treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset, char* buf);
 
 treeNode *malloc_root, *data_root;//, *stack_root;
 
@@ -379,7 +207,7 @@ treeNode* FindMaxAddress(treeNode *node)
 		return node;
 }
 
-treeNode * InsertDAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset)
+treeNode * InsertDAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset, char* buf)
 {
 	if(node==NULL)
 	{
@@ -392,28 +220,32 @@ treeNode * InsertDAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size,
 		temp -> left = temp -> right = NULL;
 		temp->offset = offset;
 		temp->fd = fd;
+		temp->path = strdup(buf);
 		return temp;
 	}
 
 	if(address >(node->address))
 	{
-		node->right = InsertDAddress(node->right,address,fd,size, offset);
+		node->right = InsertDAddress(node->right,address,fd,size, offset, buf);
 	}
 	else if(address < (node->address))
 	{
-		node->left = InsertDAddress(node->left,address,fd,size, offset);
+		node->left = InsertDAddress(node->left,address,fd,size, offset, buf);
 	}
 	else
 	{
 		node->size = size;
 		node->offset = offset;
 		node->usedforread = TRUE;
+		if(node->path != NULL)
+			free(node->path);
+		node->path = strdup(buf);
 	}
 	/* Else there is nothing to do as the data is already in the tree. */
 	return node;
 }
 
-treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset)
+treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size, ADDRINT offset, char* buf)
 {
 	if(node==NULL)
 	{
@@ -426,16 +258,17 @@ treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size,
 		temp->offset = offset;
 		temp -> left = temp -> right = NULL;
 		temp->fd = fd;
+		temp->path = strdup(buf);
 		return temp;
 	}
 
 	if(address >(node->address))
 	{
-		node->right = InsertSAddress(node->right,address,fd,size, offset);
+		node->right = InsertSAddress(node->right,address,fd,size, offset, buf);
 	}
 	else if(address < (node->address))
 	{
-		node->left = InsertSAddress(node->left,address,fd,size, offset);
+		node->left = InsertSAddress(node->left,address,fd,size, offset, buf);
 	}
 	else
 	{
@@ -443,6 +276,9 @@ treeNode * InsertSAddress(treeNode *node, ADDRINT address, int fd, ADDRINT size,
 		node->size = size;
 		node->offset = offset;
 		node->usedforread = TRUE;
+		if(node->path != NULL)
+			free(node->path);
+		node->path = strdup(buf);
 	}
 	/* Else there is nothing to do as the data is already in the tree. */
 	return node;
@@ -461,7 +297,7 @@ treeNode * InsertMAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT
 		temp -> size = size;
 		temp -> usedforread = FALSE;
 		temp -> left = temp -> right = NULL;
-//	    fprintf(trace, "%lx malloc %lx %lx\n", PIN_ThreadUid(), size, address);
+		temp->path = NULL;
 		return temp;
 	}
 
@@ -511,6 +347,11 @@ treeNode * DeleteAddress(treeNode *node, ADDRINT address)
 			node -> address = temp->address;
 			node->size = temp->size;
 			node->usedforread = temp->usedforread;
+			if(node->path != NULL)
+				free(node->path);
+			node->path = temp->path;
+
+			temp->path = NULL;
 
 			/* As we replaced it with some other node, we have to delete that node */
 			node -> right = DeleteAddress(node->right,temp->address);
@@ -526,6 +367,8 @@ treeNode * DeleteAddress(treeNode *node, ADDRINT address)
 				node = node->left;
 			else
 				assert(0);
+			if(temp->path != NULL)
+				free(temp->path);
 			free(temp); /* temp is longer required */
 		}
 	}
@@ -650,9 +493,6 @@ struct thread
 	char *buffer;
 	int flag;
 	treeNode *stack;
-	FD_TABLE *fdtable;
-
-	char* newfdpath;
 
 	struct thread *left, *right;
 };
@@ -733,7 +573,6 @@ struct thread* InsertThread(PIN_THREAD_UID threadid, struct thread *node)
 		node->buffer = (char*)malloc(sizeof(char)*MAX_BUFSIZE);
 		assert(node->buffer);
 		node->stack = NULL;
-		node->fdtable = NULL;
 	}
 	else
 	{
@@ -802,14 +641,14 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 {
 	//	unsigned int i;
 	//	struct iovec* vec;
-	//	char buf[MAX_BUFSIZE];
 
 	treeNode *node;
 
 //	ADDRINT addr;
 
 	off_t offset;
-	FD *fd;
+	char buf[2][MAX_BUFSIZE];
+	int tmp;
 
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
 	PIN_MutexLock(&thread_lock);
@@ -829,16 +668,11 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		if(arg0 == 0)
 			break;
 
-		PIN_MutexLock(&thread->fdtable->lock);
-		fd = FindFD(thread->fdtable->root, arg0);
-		PIN_MutexUnlock(&thread->fdtable->lock);
-
-//		assert(fd);
+		sprintf(buf[0], "/proc/self/fd/%d", (int)arg0);
+		tmp = readlink(buf[0], buf[1], MAX_BUFSIZE);
+		buf[1][tmp] = '\0';
 
 		offset = lseek((int)arg0, 0, SEEK_CUR);
-//
-//		if(fd != NULL)
-//			fd->buffer = InsertDAddress(fd->buffer, arg1, fd->fd, 0, 0);
 
 		PIN_MutexLock(&malloc_lock);
 		node = FindAddressInRange(malloc_root, arg1);
@@ -848,20 +682,23 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 			node->usedforread = TRUE;
 			node->offset = offset;
 			node->fd = (int)arg0;
+			if(node->path != NULL)
+				free(node->path);
+			node->path = strdup(buf[1]);
 			//bb8
 			sprintf(thread->buffer, "%lx|%x|%lx|%lx|%lx|%lx|", threadid, MALLOC_READ, arg0, arg1, arg2, offset);
 		}
 		else if(arg1 >= sp - pagesize)
 		{
 			//bb9
-			thread->stack = InsertSAddress(thread->stack, arg1, (int)arg0, arg2, offset);
+			thread->stack = InsertSAddress(thread->stack, arg1, (int)arg0, arg2, offset, buf[1]);
 			sprintf(thread->buffer, "%lx|%x|%lx|%lx|%lx|%lx|", threadid, STACK_READ, arg0, arg1, arg2, offset);
 		}
 		else
 		{
 			//bba
 			PIN_MutexLock(&data_lock);
-			data_root = InsertDAddress(data_root, arg1, (int)arg0, arg2, offset);
+			data_root = InsertDAddress(data_root, arg1, (int)arg0, arg2, offset, buf[1]);
 			PIN_MutexUnlock(&data_lock);
 			sprintf(thread->buffer, "%lx|%x|%lx|%lx|%lx|%lx|", threadid, DATA_READ, arg0, arg1, arg2, offset);
 		}
@@ -876,6 +713,94 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2, offset);
 		thread->flag = SYS_WRITE;
 		return;
+
+	case SYS_LSEEK:
+		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2);
+		thread->flag = SYS_LSEEK;
+		break;
+
+	case SYS_FCNTL:
+		if(arg1 == F_DUPFD || arg1 == F_DUPFD_CLOEXEC)
+		{
+			sprintf(thread->buffer, "%lx|%x|", threadid, SYS_OPEN);
+			thread->flag = SYS_OPEN;
+			break;
+		}
+		else
+		{
+			thread->flag = SYS_NONE;
+			return;
+		}
+
+	case SYS_OPENAT:
+	case SYS_CREAT:
+	case SYS_OPEN:
+
+	case SYS_DUP:
+	case SYS_DUP2:
+	case SYS_DUP3:
+
+	case SYS_ACCEPT:
+	case SYS_ACCEPT4:
+	case SYS_EPOLL_CREATE:
+	case SYS_SOCKET:
+	case SYS_PIPE:
+	case SYS_PIPE2:
+	case SYS_SIGNALFD:
+	case SYS_TIMERFD_CREATE:
+	case SYS_EVENTFD:
+	case SYS_SIGNALFD4:
+	case SYS_EVENTFD2:
+		sprintf(thread->buffer, "%lx|%x|", threadid, SYS_OPEN);
+		thread->flag = SYS_OPEN;
+		break;
+
+	case SYS_CLOSE:
+		if(arg0 == 0 || arg0 == 1 || arg0 == 2)
+			break;
+
+		sprintf(thread->buffer, "%lx|%lx|%lx|", threadid, num, arg0);
+
+		thread->flag = SYS_CLOSE;
+		break;
+
+	case SYS_CLONE:
+		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2);
+		if(arg0 & CLONE_FILES)
+		{
+			thread->buffer = strcat(thread->buffer, "files|");
+		}
+		if(arg0 & CLONE_NEWPID)
+		{
+			thread->buffer = strcat(thread->buffer, "newpid|");
+		}
+		if(arg0 & CLONE_VM)
+		{
+			thread->buffer = strcat(thread->buffer, "vm|");
+		}
+		if(arg0 & CLONE_THREAD)
+		{
+			thread->buffer = strcat(thread->buffer, "thread|");
+		}
+		if(arg0 & CLONE_IO)
+		{
+			thread->buffer = strcat(thread->buffer, "io|");
+		}
+		thread->flag = SYS_NONE;
+		return;
+
+	case SYS_EXECVE:
+		sprintf(thread->buffer, "%lx|%lx|%s|", threadid, num, (char*)arg0);
+		fprintf(trace, "%s\n", thread->buffer);
+		thread->buffer[0] = '\0';
+		fflush(trace);
+		thread->flag = 0;
+		PIN_MutexLock(&thread_lock);
+		root_thread = DeleteThread(threadid, root_thread);
+		PIN_MutexUnlock(&thread_lock);
+		thread->flag = SYS_NONE;
+		break;
+
 		//	case SYS_READV:
 		//	case SYS_WRITEV:
 		//		sprintf(thread->buffer, "%x %lx %lx %lx %lx ", threadid, ip, num, arg0, arg2);
@@ -905,191 +830,6 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		//		thread->flag = 3;
 		//		return;
 
-	case SYS_LSEEK:
-		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2);
-		thread->flag = SYS_LSEEK;
-		break;
-
-	case SYS_FCNTL:
-		if(arg1 == F_DUPFD || arg1 == F_DUPFD_CLOEXEC)
-		{
-			PIN_MutexLock(&thread->fdtable->lock);
-			fd = FindFD(thread->fdtable->root, arg0);
-			PIN_MutexUnlock(&thread->fdtable->lock);
-
-			if(fd!=NULL)
-			{
-				sprintf(thread->buffer, "%lx|%lx|%lx|%s|", threadid, num, arg0, fd->path);
-				thread->newfdpath = strdup(fd->path);
-			}
-			else
-			{
-				sprintf(thread->buffer, "%lx|%lx|%lx|%s|", threadid, num, arg0, "dup");
-				thread->newfdpath = strdup("dup");
-			}
-
-			thread->flag = SYS_DUP;
-			break;
-		}
-		else
-		{
-			thread->flag = SYS_NONE;
-			return;
-		}
-
-	case SYS_DUP:
-	case SYS_DUP2:
-	case SYS_DUP3:
-		PIN_MutexLock(&thread->fdtable->lock);
-		fd = FindFD(thread->fdtable->root, arg0);
-		PIN_MutexUnlock(&thread->fdtable->lock);
-
-		if(fd!=NULL)
-		{
-			sprintf(thread->buffer, "%lx|%lx|%lx|%s|", threadid, num, arg0, fd->path);
-			thread->newfdpath = strdup(fd->path);
-		}
-		else
-		{
-			sprintf(thread->buffer, "%lx|%lx|%lx|%s|", threadid, num, arg0, "dup");
-			thread->newfdpath = strdup("dup");
-		}
-
-		thread->flag = SYS_DUP;
-		break;
-
-	case SYS_ACCEPT:
-	case SYS_ACCEPT4:
-	case SYS_EPOLL_CREATE:
-	case SYS_SOCKET:
-	case SYS_PIPE:
-	case SYS_PIPE2:
-	case SYS_SIGNALFD:
-	case SYS_TIMERFD_CREATE:
-	case SYS_EVENTFD:
-	case SYS_SIGNALFD4:
-	case SYS_EVENTFD2:
-		sprintf(thread->buffer, "%lx|%lx|%lx|%s|", threadid, num, arg0, "etc");
-		thread->newfdpath = strdup("etc");
-		thread->flag = SYS_OPEN;
-		break;
-
-	case SYS_OPENAT:
-		sprintf(thread->buffer, "%lx|%lx|%s|", threadid, num, (char*)arg1);
-		thread->newfdpath = strdup((const char*)arg1);
-		thread->flag = SYS_OPEN;
-		break;
-
-	case SYS_CREAT:
-	case SYS_OPEN:
-		sprintf(thread->buffer, "%lx|%lx|%s|", threadid, num, (char*)arg0);
-		thread->newfdpath = strdup((const char*)arg0);
-		thread->flag = SYS_OPEN;
-		break;
-
-	case SYS_CLOSE:
-		if(arg0 == 0 || arg0 == 1 || arg0 == 2)
-			break;
-		PIN_MutexLock(&thread->fdtable->lock);
-		fd = FindFD(thread->fdtable->root, arg0);
-		PIN_MutexUnlock(&thread->fdtable->lock);
-
-//		assert(fd);
-
-//		if(fd)
-//		{
-//			while(fd->buffer)
-//			{
-//				addr = fd->buffer->address;
-//
-//				//malloc
-//				PIN_MutexLock(&malloc_lock);
-//				node = FindAddressInRange(malloc_root, addr);
-//				PIN_MutexUnlock(&malloc_lock);
-//				if(node != NULL)
-//					node->usedforread = FALSE;
-//				//stack
-//				else
-//				{
-//					node = FindAddressInRange(thread->stack, addr);
-//					if(node)
-//					{
-//						thread->stack = DeleteAddress(thread->stack, node->address);
-//					}
-//					else
-//					{
-//						//data
-//						PIN_MutexLock(&data_lock);
-//						node = FindAddressInRange(data_root, addr);
-//						if(node)
-//						{
-//							data_root = DeleteAddress(data_root, node->address);
-//						}
-//						PIN_MutexUnlock(&data_lock);
-//					}
-//				}
-//				fd->buffer = DeleteAddress(fd->buffer, addr);
-//			}
-//		}
-
-		sprintf(thread->buffer, "%lx|%lx|%lx|", threadid, num, arg0);
-		PIN_MutexLock(&thread->fdtable->lock);
-		thread->fdtable->root = DeleteFD(thread->fdtable->root, arg0);
-		PIN_MutexUnlock(&thread->fdtable->lock);
-
-		thread->flag = SYS_CLOSE;
-		break;
-
-//	case SYS_EXIT:
-//	case SYS_EXIT_GROUP:
-//	case SYS_FORK:
-//	case SYS_VFORK:
-//		sprintf(thread->buffer, "%lx %lx %lx ", threadid, num, arg0);
-//		fprintf(trace, "%s\n", thread->buffer);
-//		fflush(trace);
-//		thread->buffer[0] = '\0';
-//		thread->flag = SYS_NONE;
-//		return;
-
-	case SYS_CLONE:
-		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2);
-		if(arg0 & CLONE_FILES)
-		{
-			thread->buffer = strcat(thread->buffer, "files|");
-		}
-		if(arg0 & CLONE_NEWPID)
-		{
-			thread->buffer = strcat(thread->buffer, "newpid|");
-		}
-		if(arg0 & CLONE_VM)
-		{
-			thread->buffer = strcat(thread->buffer, "vm|");
-		}
-		if(arg0 & CLONE_THREAD)
-		{
-			thread->buffer = strcat(thread->buffer, "thread|");
-		}
-		if(arg0 & CLONE_IO)
-		{
-			thread->buffer = strcat(thread->buffer, "io|");
-		}
-//		thread->flag = SYS_CLONE;
-		thread->flag = SYS_NONE;
-//		thread->flag = 1;
-		return;
-
-	case SYS_EXECVE:
-		sprintf(thread->buffer, "%lx|%lx|%s|", threadid, num, (char*)arg0);
-		fprintf(trace, "%s\n", thread->buffer);
-		thread->buffer[0] = '\0';
-		fflush(trace);
-		thread->flag = 0;
-		PIN_MutexLock(&thread_lock);
-		root_thread = DeleteThread(threadid, root_thread);
-		PIN_MutexUnlock(&thread_lock);
-		thread->flag = SYS_NONE;
-		break;
-
 	default :
 //		sprintf(thread->buffer, "%ld ", num);
 //		fprintf(trace, "%ld\n", num);
@@ -1106,7 +846,8 @@ VOID SysAfter(ADDRINT ret)
 	PIN_MutexLock(&thread_lock);
 	struct thread *thread = FindThread(threadid);
 	PIN_MutexUnlock(&thread_lock);
-	char buf[MAX_BUFSIZE];
+	char buf[2][MAX_BUFSIZE];
+	int tmp;
 
 //	fprintf(stderr, "%ld\n", ret);
 
@@ -1123,21 +864,21 @@ VOID SysAfter(ADDRINT ret)
 	if(thread->flag != SYS_NONE)
 	{
 //		if(!(thread->flag == 3 && ((ret+1 == 0) || (ret == 0))))
-		if((thread->flag == SYS_OPEN || thread->flag == SYS_DUP) && (ret+1 != 0))
+		if(thread->flag == SYS_OPEN && ret+1 != 0)
 		{
-			PIN_MutexLock(&thread->fdtable->lock);
-			thread->fdtable->root = InsertFD(thread->fdtable->root, ret, thread->newfdpath);
-			PIN_MutexUnlock(&thread->fdtable->lock);
+			sprintf(buf[0], "/proc/self/fd/%d", (int)ret);
+			tmp = readlink(buf[0], buf[1], MAX_BUFSIZE);
+			buf[1][tmp] = '\0';
 
 			fstat((int)ret, &stat);
 
-			sprintf(buf,"%lx|%x\n", stat.st_size, (unsigned int)ret);
-			strcat(thread->buffer, buf);
+			sprintf(buf[0],"%s|%lx|%x\n", buf[1], stat.st_size, (unsigned int)ret);
+			strcat(thread->buffer, buf[0]);
 		}
 		else
 		{
-			sprintf(buf,"%x\n", (unsigned int)ret);
-			strcat(thread->buffer, buf);
+			sprintf(buf[0],"%x\n", (unsigned int)ret);
+			strcat(thread->buffer, buf[0]);
 		}
 		fprintf(trace, "%s", thread->buffer);
 		fflush(trace);
@@ -1176,10 +917,6 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 {
 	treeNode *node;
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	FD *fd;
-	PIN_MutexLock(&thread_lock);
-	struct thread* thread = FindThread(threadid);
-	PIN_MutexUnlock(&thread_lock);
 
 	ADDRINT startoffset, endoffset;
 
@@ -1189,19 +926,11 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	if(node && node->usedforread == TRUE)
 	{
 		fprintf(trace, "%lx|%x|%lx|%lx\n", threadid, DATA, memaddr, writesize);
-		PIN_MutexLock(&thread->fdtable->lock);
-		fd = FindFD(thread->fdtable->root, node->fd);
-		PIN_MutexUnlock(&thread->fdtable->lock);
 
-		if(fd)
-		{
-			startoffset = memaddr - node->address + node->offset;
-			endoffset = memaddr - node->address + node->offset + writesize;
+		startoffset = memaddr - node->address + node->offset;
+		endoffset = memaddr - node->address + node->offset + writesize;
 
-			fprintf(trace, "%s|%lx|%lx\n", fd->path, startoffset, endoffset);
-		}
-//		else
-//			fprintf(trace, "%s|%lx|%lx\n", "unknown", startoffset, endoffset);
+		fprintf(trace, "%s|%lx|%lx\n", node->path, startoffset, endoffset);
 		return;
 	}
 	PIN_MutexLock(&malloc_lock);
@@ -1210,21 +939,12 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	if(node && node->usedforread == TRUE)
 	{
 		fprintf(trace, "%lx|%x|%lx|%lx\n", threadid, MALLOC, memaddr, writesize);
-		PIN_MutexLock(&thread->fdtable->lock);
-		fd = FindFD(thread->fdtable->root, node->fd);
-		PIN_MutexUnlock(&thread->fdtable->lock);
 
-//		assert(fd);
+		startoffset = memaddr - node->address + node->offset;
+		endoffset = memaddr - node->address + node->offset + writesize;
 
-		if(fd)
-		{
-			startoffset = memaddr - node->address + node->offset;
-			endoffset = memaddr - node->address + node->offset + writesize;
-
-			fprintf(trace, "%s|%lx|%lx\n", fd->path, startoffset, endoffset);
-		}
-//		else
-//			fprintf(trace, "%s|%lx|%lx\n", "unknown", startoffset, endoffset);
+		fprintf(trace, "%s|%lx|%lx\n", node->path, startoffset, endoffset);
+		return;
 	}
 }
 
@@ -1232,7 +952,6 @@ VOID StackWrite(ADDRINT memaddr, ADDRINT writesize)
 {
 	treeNode *node;
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-	FD *fd;
 	ADDRINT startoffset, endoffset;
 
 	PIN_MutexLock(&thread_lock);
@@ -1243,17 +962,11 @@ VOID StackWrite(ADDRINT memaddr, ADDRINT writesize)
 	if(node && node->usedforread == TRUE)
 	{
 		fprintf(trace, "%lx|%x|%lx|%lx\n", threadid, STACK, memaddr, writesize);
-		PIN_MutexLock(&thread->fdtable->lock);
-		fd = FindFD(thread->fdtable->root, node->fd);
-		PIN_MutexUnlock(&thread->fdtable->lock);
 
-		if(fd)
-		{
-			startoffset = memaddr - node->address + node->offset;
-			endoffset = memaddr - node->address + node->offset + writesize;
+		startoffset = memaddr - node->address + node->offset;
+		endoffset = memaddr - node->address + node->offset + writesize;
 
-			fprintf(trace, "%s|%lx|%lx\n", fd->path, startoffset, endoffset);
-		}
+		fprintf(trace, "%s|%lx|%lx\n", node->path, startoffset, endoffset);
 	}
 }
 
@@ -1413,54 +1126,11 @@ VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 		root_thread = InsertThread(threadid, root_thread);
 	temp = FindThread(threadid);
 	PIN_MutexUnlock(&thread_lock);
-//	fprintf(trace, "%lx %x %x %x\n",  threadid, THREADSTART, PIN_GetTid(), PIN_GetParentTid());
-	temp->fdtable = (FD_TABLE*)malloc(sizeof(FD_TABLE));
-
-	if(PIN_GetParentTid() == 0)
-	{
-		//no parent
-		PIN_MutexInit(&temp->fdtable->lock);
-		temp->fdtable->count = 0;
-		temp->fdtable->root = NULL;
-		temp->fdtable->sharecount = 1;
-	}
-	else
-	{
-		PIN_MutexLock(&thread_lock);
-		struct thread *parent = FindThreadByOSTid(root_thread, PIN_GetParentTid());
-		PIN_MutexUnlock(&thread_lock);
-
-		PIN_MutexInit(&temp->fdtable->lock);
-		temp->fdtable->count = 0;
-		temp->fdtable->root = NULL;
-		temp->fdtable->sharecount = 1;
-		PIN_MutexLock(&parent->fdtable->lock);
-		temp->fdtable->root = CopyFD_TABLE(parent->fdtable->root);
-		PIN_MutexUnlock(&parent->fdtable->lock);
-	}
-	fflush(trace);
 }
 
 VOID ThreadFini(THREADID threadIndex, const CONTEXT *ctxt, INT32 code, VOID *v)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
-//	fprintf(trace, "%lx %x\n", threadid, THREADEND);
-	fflush(trace);
-	PIN_MutexLock(&thread_lock);
-	struct thread* node = FindThread(threadid);
-	PIN_MutexUnlock(&thread_lock);
-
-	PIN_MutexLock(&node->fdtable->lock);
-	node->fdtable->sharecount--;
-	if(node->fdtable->sharecount == 0)
-	{
-		FreeFD_TABLE(node->fdtable->root);
-	}
-	PIN_MutexUnlock(&node->fdtable->lock);
-
-	PIN_MutexFini(&node->fdtable->lock);
-	free(node->fdtable);
-
 	PIN_MutexLock(&thread_lock);
 	root_thread = DeleteThread(threadid, root_thread);
 	PIN_MutexUnlock(&thread_lock);
