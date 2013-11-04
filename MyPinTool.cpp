@@ -118,7 +118,6 @@ END_LEGAL */
 
 #define SYS_WAIT4	__NR_wait4//247
 
-#define MAX_THREAD 100000
 #define MAX_BUFSIZE	1024
 
 #define THREADSTART 1000	//3e8
@@ -139,6 +138,8 @@ END_LEGAL */
 
 #define SYS_NONE	9999
 #define SYS_FDETC	9998
+
+#define COW	9997
 
 using namespace std;
 
@@ -161,8 +162,6 @@ VOID   Free( CONTEXT * context, AFUNPTR orgFuncptr, void * arg0 );
 
 typedef struct treeNode
 {
-	PIN_THREAD_UID threadid;
-
 	ADDRINT address;
 	ADDRINT size;
 	BOOL usedforread;
@@ -194,6 +193,7 @@ treeNode* FindMinAddress(treeNode *node)
 	else
 		return node;
 }
+
 treeNode* FindMaxAddress(treeNode *node)
 {
 	if(node==NULL)
@@ -291,7 +291,6 @@ treeNode * InsertMAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT
 		treeNode *temp;
 		temp = (treeNode *)malloc(sizeof(treeNode));
 		assert(temp);
-		temp -> threadid = PIN_ThreadUid();
 		temp -> address = address;
 		temp->offset = offset;
 		temp -> size = size;
@@ -311,10 +310,12 @@ treeNode * InsertMAddress(treeNode *node, ADDRINT address, ADDRINT size, ADDRINT
 	}
 	else
 	{
-		if(node->size == size && node->address == address && node->threadid == PIN_ThreadUid())
-		{
-			return node;
-		}
+		node->size = size;
+		node->address = address;
+		node->usedforread = FALSE;
+		if(node->path != NULL)
+			free(node->path);
+		node->path = NULL;
 	}
 	/* Else there is nothing to do as the data is already in the tree. */
 	return node;
@@ -498,26 +499,6 @@ struct thread
 };
 struct thread *root_thread;
 
-struct thread* FindThreadByOSTid(struct thread *node, OS_THREAD_ID threadid)
-{
-	if(node == NULL)
-		return NULL;
-
-	if(node->OStid == threadid)
-		return node;
-
-	struct thread *ret;
-	ret = FindThreadByOSTid(node->left, threadid);
-	if(ret != NULL)
-		return ret;
-
-	ret = FindThreadByOSTid(node->right, threadid);
-	if(ret != NULL)
-		return ret;
-
-	return NULL;
-}
-
 struct thread* FindThread(PIN_THREAD_UID threadid)
 {
 	struct thread *t = root_thread;
@@ -649,6 +630,9 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	off_t offset;
 	char buf[2][MAX_BUFSIZE];
 	int tmp;
+	int i;
+
+	struct iovec *vec;
 
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
 	PIN_MutexLock(&thread_lock);
@@ -660,6 +644,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	switch(num)
 	{
 	case SYS_READ:
+	case SYS_PREAD64:
 		//arg0 : fd
 		//arg1 : buf addr
 		//arg2 : buf size
@@ -672,7 +657,16 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		tmp = readlink(buf[0], buf[1], MAX_BUFSIZE);
 		buf[1][tmp] = '\0';
 
+		if(num == SYS_READ)
+		{
 		offset = lseek((int)arg0, 0, SEEK_CUR);
+		if(offset+1 == 0)
+			offset = 0;
+		}
+		else
+		{
+			offset = arg3;
+		}
 
 		PIN_MutexLock(&malloc_lock);
 		node = FindAddressInRange(malloc_root, arg1);
@@ -686,13 +680,13 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 				free(node->path);
 			node->path = strdup(buf[1]);
 			//bb8
-			sprintf(thread->buffer, "%lx|%x|%lx|%lx|%lx|%lx|", threadid, MALLOC_READ, arg0, arg1, arg2, offset);
+			sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", MALLOC_READ, arg0, arg1, arg2, offset);
 		}
 		else if(arg1 >= sp - pagesize)
 		{
 			//bb9
 			thread->stack = InsertSAddress(thread->stack, arg1, (int)arg0, arg2, offset, buf[1]);
-			sprintf(thread->buffer, "%lx|%x|%lx|%lx|%lx|%lx|", threadid, STACK_READ, arg0, arg1, arg2, offset);
+			sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", STACK_READ, arg0, arg1, arg2, offset);
 		}
 		else
 		{
@@ -700,29 +694,119 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 			PIN_MutexLock(&data_lock);
 			data_root = InsertDAddress(data_root, arg1, (int)arg0, arg2, offset, buf[1]);
 			PIN_MutexUnlock(&data_lock);
-			sprintf(thread->buffer, "%lx|%x|%lx|%lx|%lx|%lx|", threadid, DATA_READ, arg0, arg1, arg2, offset);
+			sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", DATA_READ, arg0, arg1, arg2, offset);
+		}
+		thread->flag = SYS_READ;
+		return;
+
+	case SYS_PREADV:
+	case SYS_READV:
+		//stdin
+		if(arg0 == 0)
+			break;
+
+		sprintf(buf[0], "/proc/self/fd/%d", (int)arg0);
+		tmp = readlink(buf[0], buf[1], MAX_BUFSIZE);
+		buf[1][tmp] = '\0';
+
+		if(num == SYS_READV)
+		{
+			offset = lseek((int)arg0, 0, SEEK_CUR);
+			if(offset+1 == 0)
+				offset = 0;
+		}
+		else
+			offset = arg3;
+
+		vec = (struct iovec *)arg1;
+		for(i=0; i < (int)arg2; i++)
+		{
+			PIN_MutexLock(&malloc_lock);
+			node = FindAddressInRange(malloc_root, (ADDRINT)vec[i].iov_base);
+			PIN_MutexUnlock(&malloc_lock);
+			if(node != NULL)
+			{
+				node->usedforread = TRUE;
+				node->offset = offset;
+				node->fd = (int)arg0;
+				if(node->path != NULL)
+					free(node->path);
+				node->path = strdup(buf[1]);
+				//bb8
+				sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", MALLOC_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+			}
+			else if(arg1 >= sp - pagesize)
+			{
+				//bb9
+				thread->stack = InsertSAddress(thread->stack, arg1, (int)arg0, arg2, offset, buf[1]);
+				sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", STACK_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+			}
+			else
+			{
+				//bba
+				PIN_MutexLock(&data_lock);
+				data_root = InsertDAddress(data_root, arg1, (int)arg0, arg2, offset, buf[1]);
+				PIN_MutexUnlock(&data_lock);
+				sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", DATA_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+			}
 		}
 		thread->flag = SYS_READ;
 		return;
 
 	case SYS_WRITE:
+	case SYS_PWRITE64:
 		if(arg0 == 1 || arg0 == 2)
 			break;
 
-		offset = lseek((int)arg0, 0, SEEK_CUR);
-		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2, offset);
+		if(num == SYS_WRITE)
+		{
+			offset = lseek((int)arg0, 0, SEEK_CUR);
+			if(offset + 1 == 0)
+				offset = 0;
+		}
+		else
+			offset = arg3;
+
+		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", num, arg0, arg1, arg2, offset);
 		thread->flag = SYS_WRITE;
 		return;
 
+	case SYS_PWRITEV:
+	case SYS_WRITEV:
+		//stdin
+		if(arg0 == 0)
+			break;
+
+		sprintf(buf[0], "/proc/self/fd/%d", (int)arg0);
+		tmp = readlink(buf[0], buf[1], MAX_BUFSIZE);
+		buf[1][tmp] = '\0';
+
+		if(num == SYS_PWRITEV)
+		{
+			offset = lseek((int)arg0, 0, SEEK_CUR);
+			if(offset + 1 == 0)
+				offset = 0;
+		}
+		else
+			offset = arg3;
+
+		vec = (struct iovec *)arg1;
+		for(i=0; i < (int)arg2; i++)
+		{
+			sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", num, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+		}
+		thread->flag = SYS_PWRITEV;
+		return;
+
 	case SYS_LSEEK:
-		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2);
+		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|", num, arg0, arg1, arg2);
 		thread->flag = SYS_LSEEK;
 		break;
 
 	case SYS_FCNTL:
 		if(arg1 == F_DUPFD || arg1 == F_DUPFD_CLOEXEC)
 		{
-			sprintf(thread->buffer, "%lx|%x|", threadid, SYS_OPEN);
+			sprintf(thread->buffer, "%x|", SYS_OPEN);
 			thread->flag = SYS_OPEN;
 			break;
 		}
@@ -751,7 +835,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	case SYS_EVENTFD:
 	case SYS_SIGNALFD4:
 	case SYS_EVENTFD2:
-		sprintf(thread->buffer, "%lx|%x|", threadid, SYS_OPEN);
+		sprintf(thread->buffer, "%x|", SYS_OPEN);
 		thread->flag = SYS_OPEN;
 		break;
 
@@ -759,76 +843,47 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		if(arg0 == 0 || arg0 == 1 || arg0 == 2)
 			break;
 
-		sprintf(thread->buffer, "%lx|%lx|%lx|", threadid, num, arg0);
+		sprintf(thread->buffer, "%lx|%lx|", num, arg0);
 
 		thread->flag = SYS_CLOSE;
 		break;
 
-	case SYS_CLONE:
-		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", threadid, num, arg0, arg1, arg2);
-		if(arg0 & CLONE_FILES)
-		{
-			thread->buffer = strcat(thread->buffer, "files|");
-		}
-		if(arg0 & CLONE_NEWPID)
-		{
-			thread->buffer = strcat(thread->buffer, "newpid|");
-		}
-		if(arg0 & CLONE_VM)
-		{
-			thread->buffer = strcat(thread->buffer, "vm|");
-		}
-		if(arg0 & CLONE_THREAD)
-		{
-			thread->buffer = strcat(thread->buffer, "thread|");
-		}
-		if(arg0 & CLONE_IO)
-		{
-			thread->buffer = strcat(thread->buffer, "io|");
-		}
-		thread->flag = SYS_NONE;
-		return;
+//	case SYS_CLONE:
+//		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|", num, arg0, arg1, arg2);
+//		if(arg0 & CLONE_FILES)
+//		{
+//			thread->buffer = strcat(thread->buffer, "files|");
+//		}
+//		if(arg0 & CLONE_NEWPID)
+//		{
+//			thread->buffer = strcat(thread->buffer, "newpid|");
+//		}
+//		if(arg0 & CLONE_VM)
+//		{
+//			thread->buffer = strcat(thread->buffer, "vm|");
+//		}
+//		if(arg0 & CLONE_THREAD)
+//		{
+//			thread->buffer = strcat(thread->buffer, "thread|");
+//		}
+//		if(arg0 & CLONE_IO)
+//		{
+//			thread->buffer = strcat(thread->buffer, "io|");
+//		}
+//		thread->flag = SYS_NONE;
+//		return;
 
-	case SYS_EXECVE:
-		sprintf(thread->buffer, "%lx|%lx|%s|", threadid, num, (char*)arg0);
-		fprintf(trace, "%s\n", thread->buffer);
-		thread->buffer[0] = '\0';
-		fflush(trace);
-		thread->flag = 0;
-		PIN_MutexLock(&thread_lock);
-		root_thread = DeleteThread(threadid, root_thread);
-		PIN_MutexUnlock(&thread_lock);
-		thread->flag = SYS_NONE;
-		break;
-
-		//	case SYS_READV:
-		//	case SYS_WRITEV:
-		//		sprintf(thread->buffer, "%x %lx %lx %lx %lx ", threadid, ip, num, arg0, arg2);
-		//		vec = (struct iovec *)arg1;
-		//		for(i=0; i < arg2; i++)
-		//		{
-		//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
-		//			strcat(thread->buffer, buf);
-		//		}
-		//		thread->flag = 3;
-		//		return;
-		//	case SYS_PREADV:
-		//	case SYS_PWRITEV:
-		//		sprintf(thread->buffer, "%x %lx %lx %lx %lx %lx", threadid, ip, num, arg0, arg2, arg3);
-		//		vec = (struct iovec *)arg1;
-		//		for(i=0; i < arg2; i++)
-		//		{
-		//			sprintf(buf, "%lx %lx ", (long int)vec[i].iov_base, (long int)vec[i].iov_len);
-		//			strcat(thread->buffer, buf);
-		//		}
-		//		thread->flag = 3;
-		//		return;
-		//
-		//	case SYS_PREAD64:
-		//	case SYS_PWRITE64:
-		//		sprintf(thread->buffer, "%x %lx %lx %lx %lx %lx ", threadid, ip, num, arg0, arg1, arg2);
-		//		thread->flag = 3;
-		//		return;
+//	case SYS_EXECVE:
+//		sprintf(thread->buffer, "%lx|%lx|%s|", threadid, num, (char*)arg0);
+//		fprintf(trace, "%s\n", thread->buffer);
+//		thread->buffer[0] = '\0';
+//		fflush(trace);
+//		thread->flag = 0;
+//		PIN_MutexLock(&thread_lock);
+//		root_thread = DeleteThread(threadid, root_thread);
+//		PIN_MutexUnlock(&thread_lock);
+//		thread->flag = SYS_NONE;
+//		break;
 
 	default :
 //		sprintf(thread->buffer, "%ld ", num);
@@ -885,14 +940,6 @@ VOID SysAfter(ADDRINT ret)
 		thread->buffer[0] = '\0';
 		thread->flag = SYS_NONE;
 	}
-	else
-	{
-//		fprintf(trace, "\t%ld\n", ret);
-//		sprintf(buf, "%lx", ret);
-//		strcat(thread->buffer, buf);
-//		fprintf(trace, "%s\n", thread->buffer);
-//		thread->buffer = '\0';
-	}
 }
 
 VOID SyscallEntry(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *v)
@@ -916,7 +963,6 @@ VOID SyscallExit(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID
 VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 {
 	treeNode *node;
-	PIN_THREAD_UID threadid = PIN_ThreadUid();
 
 	ADDRINT startoffset, endoffset;
 
@@ -925,12 +971,12 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	PIN_MutexUnlock(&data_lock);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%lx|%x|%lx|%lx\n", threadid, DATA, memaddr, writesize);
+		fprintf(trace, "%x|%lx|%lx\n", DATA, memaddr, writesize);
 
 		startoffset = memaddr - node->address + node->offset;
 		endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%s|%lx|%lx\n", node->path, startoffset, endoffset);
+		fprintf(trace, "%x|%s|%lx|%lx\n", COW, node->path, startoffset, endoffset);
 		return;
 	}
 	PIN_MutexLock(&malloc_lock);
@@ -938,12 +984,12 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	PIN_MutexUnlock(&malloc_lock);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%lx|%x|%lx|%lx\n", threadid, MALLOC, memaddr, writesize);
+		fprintf(trace, "%x|%lx|%lx\n", MALLOC, memaddr, writesize);
 
 		startoffset = memaddr - node->address + node->offset;
 		endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%s|%lx|%lx\n", node->path, startoffset, endoffset);
+		fprintf(trace, "%x|%s|%lx|%lx\n", COW, node->path, startoffset, endoffset);
 		return;
 	}
 }
@@ -961,12 +1007,12 @@ VOID StackWrite(ADDRINT memaddr, ADDRINT writesize)
 	node = FindAddressInRange(thread->stack, memaddr);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%lx|%x|%lx|%lx\n", threadid, STACK, memaddr, writesize);
+		fprintf(trace, "%x|%lx|%lx\n", STACK, memaddr, writesize);
 
 		startoffset = memaddr - node->address + node->offset;
 		endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%s|%lx|%lx\n", node->path, startoffset, endoffset);
+		fprintf(trace, "%x|%s|%lx|%lx\n", COW, node->path, startoffset, endoffset);
 	}
 }
 
@@ -1121,10 +1167,7 @@ VOID ThreadStart(THREADID threadIndex, CONTEXT *ctxt, INT32 flags, VOID *v)
 {
 	PIN_THREAD_UID threadid = PIN_ThreadUid();
 	PIN_MutexLock(&thread_lock);
-	struct thread *temp = FindThread(threadid);
-	if(temp == NULL)
-		root_thread = InsertThread(threadid, root_thread);
-	temp = FindThread(threadid);
+	root_thread = InsertThread(threadid, root_thread);
 	PIN_MutexUnlock(&thread_lock);
 }
 
