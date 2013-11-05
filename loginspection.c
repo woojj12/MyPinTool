@@ -46,7 +46,7 @@ int main(void)
 	pagesize = getpagesize();
 
 	printf("makefiletree\n");
-	MakeFileTree();
+//	MakeFileTree();
 
 	printf("insertlog\n");
 	InsertLog();
@@ -57,10 +57,10 @@ int main(void)
 	while(node != NULL)
 	{
 		int offset;
-		printf("%s %ld\n", node->path, node->size);
+		printf("%s|%d|", node->path, node->pages);
 		for(offset = 0; offset < node->pages; offset++)
 		{
-			printf("%d ", node->cow_page[offset]);
+			printf("%d|", node->cow_page[offset]);
 		}
 		printf("\n");
 		file_root = DeleteNode(file_root, node->path);
@@ -82,7 +82,7 @@ void InsertLog()
 	{
 		int index = 0;
 
-		while(buf[0][index+5] != '|')
+		while(buf[0][index+5] != ':')
 		{
 			buf[1][index] = buf[0][index+5];
 			index++;
@@ -97,7 +97,9 @@ void InsertLog()
 			assert(node);
 			node->path = strdup(buf[1]);
 			node->pages = 0;
-			node->cow_page = (int*)calloc(1, sizeof(int));
+			node->cow_page = (int*)malloc(sizeof(int));
+			assert(node->cow_page);
+			node->cow_page[0] = FALSE;
 			node->size = 0;
 			node->left = NULL;
 			node->right = NULL;
@@ -110,7 +112,7 @@ void InsertLog()
 		long int startoffset = 0;
 		long int endoffset = 0;
 
-		while(buf[0][index] != '|')
+		while(buf[0][index] != ':')
 		{
 			if(buf[0][index] >= 'a' && buf[0][index] <= 'z')
 				startoffset = startoffset*16 + (buf[0][index] - 'a');
@@ -120,7 +122,7 @@ void InsertLog()
 		}
 		index++;
 
-		while(buf[0][index] != '|' && buf[0][index] != '\n' && buf[0][index] != '\0')
+		while(buf[0][index] != ':' && buf[0][index] != '\n' && buf[0][index] != '\0')
 		{
 			if(buf[0][index] >= 'a' && buf[0][index] <= 'z')
 				endoffset = endoffset*16 + (buf[0][index] - 'a');
@@ -132,12 +134,16 @@ void InsertLog()
 		int pageoffset = startoffset / pagesize;
 		while(1)
 		{
-			if(pageoffset > node->pages)
+			if(pageoffset >= node->pages)
 			{
 				node->cow_page = (int*)realloc(node->cow_page, sizeof(int)*(pageoffset+1));
+				assert(node->cow_page);
+				memset(node->cow_page+node->pages+1, 0, pageoffset - node->pages);
 				node->pages = pageoffset;
 			}
 
+			assert(node->cow_page);
+//			fprintf(stderr, "%s %d %d\n", node->path, node->pages, pageoffset);
 			node->cow_page[pageoffset] = TRUE;
 			pageoffset = pageoffset + 1;
 			if(pageoffset * pagesize > endoffset)
