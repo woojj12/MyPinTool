@@ -680,13 +680,13 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 				free(node->path);
 			node->path = strdup(buf[1]);
 			//bb8
-			sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", MALLOC_READ, arg0, arg1, arg2, offset);
+			sprintf(thread->buffer, "%x:%lx:%lx:%lx:%lx:", MALLOC_READ, arg0, arg1, arg2, offset);
 		}
 		else if(arg1 >= sp - pagesize)
 		{
 			//bb9
 			thread->stack = InsertSAddress(thread->stack, arg1, (int)arg0, arg2, offset, buf[1]);
-			sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", STACK_READ, arg0, arg1, arg2, offset);
+			sprintf(thread->buffer, "%x:%lx:%lx:%lx:%lx:", STACK_READ, arg0, arg1, arg2, offset);
 		}
 		else
 		{
@@ -694,7 +694,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 			PIN_MutexLock(&data_lock);
 			data_root = InsertDAddress(data_root, arg1, (int)arg0, arg2, offset, buf[1]);
 			PIN_MutexUnlock(&data_lock);
-			sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", DATA_READ, arg0, arg1, arg2, offset);
+			sprintf(thread->buffer, "%x:%lx:%lx:%lx:%lx:", DATA_READ, arg0, arg1, arg2, offset);
 		}
 		thread->flag = SYS_READ;
 		return;
@@ -733,13 +733,13 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 					free(node->path);
 				node->path = strdup(buf[1]);
 				//bb8
-				sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", MALLOC_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+				sprintf(thread->buffer, "%x:%lx:%lx:%lx:%lx:", MALLOC_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
 			}
 			else if(arg1 >= sp - pagesize)
 			{
 				//bb9
 				thread->stack = InsertSAddress(thread->stack, arg1, (int)arg0, arg2, offset, buf[1]);
-				sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", STACK_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+				sprintf(thread->buffer, "%x:%lx:%lx:%lx:%lx:", STACK_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
 			}
 			else
 			{
@@ -747,7 +747,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 				PIN_MutexLock(&data_lock);
 				data_root = InsertDAddress(data_root, arg1, (int)arg0, arg2, offset, buf[1]);
 				PIN_MutexUnlock(&data_lock);
-				sprintf(thread->buffer, "%x|%lx|%lx|%lx|%lx|", DATA_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+				sprintf(thread->buffer, "%x:%lx:%lx:%lx:%lx:", DATA_READ, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
 			}
 		}
 		thread->flag = SYS_READ;
@@ -767,7 +767,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		else
 			offset = arg3;
 
-		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", num, arg0, arg1, arg2, offset);
+		sprintf(thread->buffer, "%lx:%lx:%lx:%lx:%lx:", num, arg0, arg1, arg2, offset);
 		thread->flag = SYS_WRITE;
 		return;
 
@@ -793,20 +793,20 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		vec = (struct iovec *)arg1;
 		for(i=0; i < (int)arg2; i++)
 		{
-			sprintf(thread->buffer, "%lx|%lx|%lx|%lx|%lx|", num, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
+			sprintf(thread->buffer, "%lx:%lx:%lx:%lx:%lx:", num, arg0, (ADDRINT)vec[i].iov_base, vec[i].iov_len, offset);
 		}
 		thread->flag = SYS_PWRITEV;
 		return;
 
 	case SYS_LSEEK:
-		sprintf(thread->buffer, "%lx|%lx|%lx|%lx|", num, arg0, arg1, arg2);
+		sprintf(thread->buffer, "%lx:%lx:%lx:%lx:", num, arg0, arg1, arg2);
 		thread->flag = SYS_LSEEK;
 		break;
 
 	case SYS_FCNTL:
 		if(arg1 == F_DUPFD || arg1 == F_DUPFD_CLOEXEC)
 		{
-			sprintf(thread->buffer, "%x|", SYS_OPEN);
+			sprintf(thread->buffer, "%x:", SYS_OPEN);
 			thread->flag = SYS_OPEN;
 			break;
 		}
@@ -835,7 +835,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 	case SYS_EVENTFD:
 	case SYS_SIGNALFD4:
 	case SYS_EVENTFD2:
-		sprintf(thread->buffer, "%x|", SYS_OPEN);
+		sprintf(thread->buffer, "%x:", SYS_OPEN);
 		thread->flag = SYS_OPEN;
 		break;
 
@@ -843,7 +843,7 @@ VOID SysBefore(ADDRINT ip, ADDRINT num, ADDRINT arg0, ADDRINT arg1, ADDRINT arg2
 		if(arg0 == 0 || arg0 == 1 || arg0 == 2)
 			break;
 
-		sprintf(thread->buffer, "%lx|%lx|", num, arg0);
+		sprintf(thread->buffer, "%lx:%lx:", num, arg0);
 
 		thread->flag = SYS_CLOSE;
 		break;
@@ -927,7 +927,7 @@ VOID SysAfter(ADDRINT ret)
 
 			fstat((int)ret, &stat);
 
-			sprintf(buf[0],"%s|%lx|%x\n", buf[1], stat.st_size, (unsigned int)ret);
+			sprintf(buf[0],"%s:%lx:%x\n", buf[1], stat.st_size, (unsigned int)ret);
 			strcat(thread->buffer, buf[0]);
 		}
 		else
@@ -971,12 +971,12 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	PIN_MutexUnlock(&data_lock);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%x|%lx|%lx\n", DATA, memaddr, writesize);
+		fprintf(trace, "%x:%lx:%lx\n", DATA, memaddr, writesize);
 
 		startoffset = memaddr - node->address + node->offset;
 		endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%x|%s|%lx|%lx\n", COW, node->path, startoffset, endoffset);
+		fprintf(trace, "%x:%s:%lx:%lx\n", COW, node->path, startoffset, endoffset);
 		return;
 	}
 	PIN_MutexLock(&malloc_lock);
@@ -984,12 +984,12 @@ VOID MemoryWrite(ADDRINT memaddr, ADDRINT writesize)
 	PIN_MutexUnlock(&malloc_lock);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%x|%lx|%lx\n", MALLOC, memaddr, writesize);
+		fprintf(trace, "%x:%lx:%lx\n", MALLOC, memaddr, writesize);
 
 		startoffset = memaddr - node->address + node->offset;
 		endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%x|%s|%lx|%lx\n", COW, node->path, startoffset, endoffset);
+		fprintf(trace, "%x:%s:%lx:%lx\n", COW, node->path, startoffset, endoffset);
 		return;
 	}
 }
@@ -1007,12 +1007,12 @@ VOID StackWrite(ADDRINT memaddr, ADDRINT writesize)
 	node = FindAddressInRange(thread->stack, memaddr);
 	if(node && node->usedforread == TRUE)
 	{
-		fprintf(trace, "%x|%lx|%lx\n", STACK, memaddr, writesize);
+		fprintf(trace, "%x:%lx:%lx\n", STACK, memaddr, writesize);
 
 		startoffset = memaddr - node->address + node->offset;
 		endoffset = memaddr - node->address + node->offset + writesize;
 
-		fprintf(trace, "%x|%s|%lx|%lx\n", COW, node->path, startoffset, endoffset);
+		fprintf(trace, "%x:%s:%lx:%lx\n", COW, node->path, startoffset, endoffset);
 	}
 }
 
