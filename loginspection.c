@@ -328,5 +328,6 @@ void StoreHandle(char* buf)
 		}
 		file->page[i]->readid[file->page[i]->count] = readid;
 		file->page[i]->count++;
+		assert(file->page[i]->count < MAX_READ);
 	}
 }
