@@ -3,7 +3,7 @@
 #include <string.h>
 #include <assert.h>
 
-#define MAX_READ 1000
+#define MAX_READ 10000
 #define MAX_BUFSIZE	1024
 
 typedef struct page
@@ -38,6 +38,10 @@ int main(void)
 	return 0;
 }
 
+/*
+ * Print
+ * Depth First Traverse and print the access info
+ */
 void Print(treeNode* node)
 {
 	if(node == NULL)
@@ -46,6 +50,8 @@ void Print(treeNode* node)
 	Print(node->left);
 
 	int i;
+	int rcnt = 0;
+	int dcnt = 0;
 	printf("%s|", node->path);
 
 	//cow
@@ -54,14 +60,26 @@ void Print(treeNode* node)
 		if(node->page[i] != NULL)
 		{
 			if(node->page[i]->count != 0)
+			{
 				printf("%d|", node->page[i]->count);
+				dcnt++;
+			}
 			else
 				printf("|");
 		}
 		else
 			printf("|");
 	}
-	printf("\n|");
+
+	//read
+	for(i=0; i<=node->size; i++)
+	{
+		if(node->page[i] != NULL)
+		{
+			rcnt++;
+		}
+	}
+	printf("\nread page / total page = %d / %d (%.2f\%)|", rcnt, node->size+1, (double)rcnt*100 / (node->size+1));
 
 	//read
 	for(i=0; i<=node->size; i++)
@@ -73,18 +91,24 @@ void Print(treeNode* node)
 		else
 			printf("|");
 	}
-	printf("\n|");
+	printf("\ndup page / read page = %d / %d (%.2f\%)|", dcnt, rcnt, (double)dcnt*100 / rcnt);
 
 	//file
 	for(i=0; i<=node->size; i++)
 	{
-		printf("|");
+		printf("f|");
 	}
+	printf("\n");
 	printf("\n");
 
 	Print(node->right);
 }
 
+/*
+ * MakeInspection
+ * Read a line from log file and inspect it
+ * Skip lines with bad format
+ */
 void MakeInspection()
 {
 	FILE *fp = fopen("log", "r");
@@ -94,6 +118,17 @@ void MakeInspection()
 
 	while(fgets(buf, MAX_BUFSIZE, fp) > 0)
 	{
+
+		int i = 0;
+		int cnt = 0;
+		while(buf[i] != '\n' && buf[i] != '\0')
+		{
+			if(buf[i] == ':')
+				cnt++;
+			i++;
+		}
+		if(cnt != 4)
+			continue;
 		if(buf[0] == '/')
 		{
 			//Read
@@ -108,12 +143,19 @@ void MakeInspection()
 	fclose(fp);
 }
 
+/*
+ * ReadHandle
+ * Parse Read log and add to BST
+ */
 void ReadHandle(char* buf)
 {
 	int i = 0;
 	char path[MAX_BUFSIZE];
 	long unsigned int offset, readsize, filesize;
 	int startpage, endpage, filesizepage;
+
+	if(buf[i] != '/')
+		return;
 
 	offset = 0;
 	readsize = 0;
@@ -127,10 +169,13 @@ void ReadHandle(char* buf)
 	path[i] = '\0';
 	i++;
 
+	if(buf[i] == '/')
+		return;
+
 	while(buf[i] != ':')
 	{
 		if(buf[i] >= 'a' && buf[i] <= 'z')
-			offset = offset*16 + (buf[i] - 'a');
+			offset = offset*16 + (buf[i] - 'a' + 10);
 		else
 			offset = offset*16 + (buf[i] - '0');
 		i++;
@@ -140,7 +185,7 @@ void ReadHandle(char* buf)
 	while(buf[i] != ':')
 	{
 		if(buf[i] >= 'a' && buf[i] <= 'z')
-			readsize = readsize*16 + (buf[i] - 'a');
+			readsize = readsize*16 + (buf[i] - 'a' + 10);
 		else
 			readsize = readsize*16 + (buf[i] - '0');
 		i++;
@@ -150,19 +195,33 @@ void ReadHandle(char* buf)
 	while(buf[i] != ':')
 	{
 		if(buf[i] >= 'a' && buf[i] <= 'z')
-			filesize = filesize*16 + (buf[i] - 'a');
+			filesize = filesize*16 + (buf[i] - 'a' + 10);
 		else
 			filesize = filesize*16 + (buf[i] - '0');
 		i++;
 	}
 
+	if(offset < 0 || readsize < 0 || filesize < 0)
+		return;
+
 	startpage = offset / pagesize;
 	endpage = (offset+readsize) / pagesize;
 	filesizepage = filesize / pagesize;
 
+	assert(endpage <= filesizepage);
+	if(startpage < 0)
+		return;
+	else if(endpage < 0)
+		return;
+	else if(filesizepage < 0)
+		return;
+
 	file_root = InsertNode(file_root, path, startpage, endpage, filesizepage);
 }
 
+/*
+ * BST Functions
+ */
 treeNode* FindNode(treeNode *node, char* path)
 {
 	if(node==NULL)
@@ -223,11 +282,13 @@ treeNode* InsertNode(treeNode *node, char* path, int startpage, int endpage, int
 		{
 			if(node->size < filesizepage)
 			{
-				PAGE** tmp = (PAGE**)malloc(sizeof(PAGE*)*(filesizepage+1));
-				memset(tmp, 0, sizeof(PAGE*)*(filesizepage+1));
-				memcpy(tmp, node->page, node->size+1);
-				free(node->page);
-				node->page = tmp;
+				//If file size of later one, expand the data structure
+				node->page = (PAGE**)realloc(node->page, sizeof(PAGE*)*(filesizepage+1));
+				int j;
+				for(j=node->size; j<=filesizepage; j++)
+				{
+					node->page[j] = NULL;
+				}
 				node->size = filesizepage;
 			}
 			int i;
@@ -257,12 +318,15 @@ void StoreHandle(char* buf)
 	while(buf[i] != ':')
 	{
 		if(buf[i] >= 'a' && buf[i] <= 'z')
-			readid = readid*16 + (buf[i] - 'a');
+			readid = readid*16 + (buf[i] - 'a' + 10);
 		else
 			readid = readid*16 + (buf[i] - '0');
 		i++;
 	}
 	i++;
+
+	if(buf[i] != '/')
+		return;
 
 	while(buf[i] != ':')
 	{
@@ -276,17 +340,7 @@ void StoreHandle(char* buf)
 	while(buf[i] != ':')
 	{
 		if(buf[i] >= 'a' && buf[i] <= 'z')
-			readid = readid*16 + (buf[i] - 'a');
-		else
-			readid = readid*16 + (buf[i] - '0');
-		i++;
-	}
-	i++;
-
-	while(buf[i] != ':')
-	{
-		if(buf[i] >= 'a' && buf[i] <= 'z')
-			startoffset = startoffset*16 + (buf[i] - 'a');
+			startoffset = startoffset*16 + (buf[i] - 'a' + 10);
 		else
 			startoffset = startoffset*16 + (buf[i] - '0');
 		i++;
@@ -296,7 +350,7 @@ void StoreHandle(char* buf)
 	while(buf[i] != ':')
 	{
 		if(buf[i] >= 'a' && buf[i] <= 'z')
-			endoffset = endoffset*16 + (buf[i] - 'a');
+			endoffset = endoffset*16 + (buf[i] - 'a' + 10);
 		else
 			endoffset = endoffset*16 + (buf[i] - '0');
 		i++;
@@ -304,16 +358,22 @@ void StoreHandle(char* buf)
 	i++;
 
 	treeNode *file = FindNode(file_root, path);
-	assert(file);
+	if(file == NULL)
+		return;
 
 	int startpage = startoffset / pagesize;
 	int endpage = endoffset / pagesize;
 
-	if(file->size < endpage)
+	if(file->size <= endpage)
 	{
 		endpage = file->size;
 	}
 	i = startpage;
+
+	if(startpage < 0)
+		return;
+	else if(startpage > endpage)
+		return;
 
 	NEXTLOOP:
 	for(; i<=endpage; i++)
